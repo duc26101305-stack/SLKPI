@@ -195,11 +195,26 @@ textarea.inp{resize:vertical;min-height:70px}
 .section-title{font-size:14.5px;font-weight:800;margin-bottom:12px;display:flex;align-items:center;gap:8px}
 .section-title .icon{color:var(--primary)}
 .logo-preview{width:70px;height:70px;border-radius:12px;object-fit:cover;background:#f1f5f9;border:1px solid var(--border)}
+.mobile-menu-btn{display:none}
+.sidebar-brand .mobile-menu-btn{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.15);color:#fff;flex-shrink:0}
+.sidebar-brand .mobile-menu-btn:hover{background:rgba(255,255,255,.18)}
+.sidebar-backdrop{display:none;position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:1400}
+.sidebar-backdrop.show{display:block}
 @media(max-width:880px){
-  .sidebar{position:fixed;left:-260px;transition:.2s;z-index:1500}
-  .sidebar.open{left:0}
+  .sidebar{position:fixed;left:-270px;top:0;transition:.2s;z-index:1500;width:260px}
+  .sidebar.open{left:0;box-shadow:0 0 40px rgba(0,0,0,.4)}
+  .mobile-menu-btn{display:inline-flex}
   .form-grid{grid-template-columns:1fr}
-  .content{padding:16px}
+  .content{padding:14px}
+  .topbar{padding:12px 14px}
+  .kpi-grid{grid-template-columns:1fr}
+  .modal{max-width:100%}
+  .card{padding:14px}
+}
+@media(max-width:520px){
+  .toolbar .right, .toolbar .left{width:100%}
+  .toolbar .right{justify-content:flex-start}
+  .filter-bar .field{min-width:140px;flex:1}
 }
 </style>
 </head>
@@ -680,6 +695,7 @@ function renderShell(appEl){
   const initials = (AppState.profile.full_name || AppState.profile.username || "U").trim().charAt(0).toUpperCase();
   appEl.innerHTML = `
     <div class="shell">
+      <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-brand">
           <div class="logo">${company && company.logo_url ? `<img src="${esc(company.logo_url)}">` : "S"}</div>
@@ -687,6 +703,7 @@ function renderShell(appEl){
             <div class="name">${esc((company && company.ten_cong_ty) || "SLKPI")}</div>
             <div class="sub">Quản lý Sản lượng &amp; Lương</div>
           </div>
+          <button class="icon-btn mobile-menu-btn" id="btn-close-sidebar" style="margin-left:auto">${ic('x')}</button>
         </div>
         <nav class="nav">
           ${menu.map(m => `<button class="nav-item ${AppState.route===m.key?'active':''}" data-route="${m.key}">${ic(m.icon)}<span>${esc(m.label)}</span></button>`).join("")}
@@ -704,15 +721,22 @@ function renderShell(appEl){
       </aside>
       <div class="main">
         <div class="topbar">
-          <div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <button class="icon-btn mobile-menu-btn" id="btn-open-sidebar">${ic('list')}</button>
             <h1 id="page-title">${esc(menu.find(m=>m.key===AppState.route)?.label || "")}</h1>
           </div>
         </div>
         <div class="content" id="page-content"></div>
       </div>
     </div>`;
-  $$(".nav-item").forEach(btn => btn.addEventListener("click", () => navigate(btn.dataset.route)));
+  $$(".nav-item").forEach(btn => btn.addEventListener("click", () => { navigate(btn.dataset.route); closeSidebar(); }));
   $("#btn-logout").addEventListener("click", async () => { await doLogout(); });
+
+  function openSidebar(){ $("#sidebar").classList.add("open"); $("#sidebar-backdrop").classList.add("show"); }
+  function closeSidebar(){ $("#sidebar").classList.remove("open"); $("#sidebar-backdrop").classList.remove("show"); }
+  $("#btn-open-sidebar").addEventListener("click", openSidebar);
+  $("#btn-close-sidebar").addEventListener("click", closeSidebar);
+  $("#sidebar-backdrop").addEventListener("click", closeSidebar);
 }
 
 function renderLogin(appEl){
