@@ -328,6 +328,16 @@ function removeVNTones(str){
 }
 function debounce(fn, wait){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),wait); }; }
 function uuidShort(){ return Math.random().toString(36).slice(2,10); }
+// Tự sinh mã dạng PREFIX + số thứ tự (vd: NV001, CD002...) dựa trên mã lớn nhất đang có
+function genCode(prefix, rows, key){
+  let max = 0;
+  (rows||[]).forEach(r => {
+    const val = String(r?.[key] || "");
+    const m = val.match(new RegExp("^" + prefix + "(\\d+)$", "i"));
+    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
+  });
+  return prefix + String(max + 1).padStart(3, "0");
+}
 
 /* ============================================================================
  * 3. BỘ ICON SVG (tự vẽ, không phụ thuộc thư viện ngoài)
@@ -817,7 +827,8 @@ function fieldInputHtml(f, val){
   } else {
     input = `<input class="inp ${req}" type="text" name="${f.key}" value="${esc(v)}" ${f.required?"required":""} />`;
   }
-  return `<div class="field ${f.span2?'span2':''}"><label>${esc(f.label)}${reqMark}</label>${input}</div>`;
+  const hint = f.hint ? `<p class="helper" style="margin-top:3px">${esc(f.hint)}</p>` : "";
+  return `<div class="field ${f.span2?'span2':''}"><label>${esc(f.label)}${reqMark}</label>${input}${hint}</div>`;
 }
 
 function genericCrudPage(config){
@@ -893,6 +904,9 @@ function genericCrudPage(config){
               if (c.type === "number") v = v === "" ? 0 : Number(v);
               payload[c.key] = v;
             });
+            if (config.uniqueKey && config.codePrefix && !String(payload[config.uniqueKey]||"").trim()) {
+              payload[config.uniqueKey] = genCode(config.codePrefix, rows, config.uniqueKey);
+            }
             const btn = overlay.querySelector("#btn-save-entity");
             btn.disabled = true;
             try {
@@ -983,9 +997,9 @@ function genericCrudPage(config){
 }
 
 const pageProcesses = genericCrudPage({
-  table: "processes", title: "Danh sách Công đoạn", icon: "layers", uniqueKey: "ma_cd",
+  table: "processes", title: "Danh sách Công đoạn", icon: "layers", uniqueKey: "ma_cd", codePrefix: "CD",
   columns: [
-    { key:"ma_cd", label:"Mã công đoạn", required:true, type:"text" },
+    { key:"ma_cd", label:"Mã công đoạn", required:false, type:"text", hint:"Để trống sẽ tự sinh mã" },
     { key:"ten_cd", label:"Tên công đoạn", required:true, type:"text" },
     { key:"gia_tien", label:"Giá tiền / 1 SP", required:true, type:"number" },
     { key:"ghi_chu", label:"Ghi chú", required:false, type:"text", span2:true },
@@ -993,9 +1007,9 @@ const pageProcesses = genericCrudPage({
 });
 
 const pageGoods = genericCrudPage({
-  table: "goods", title: "Danh sách Hàng hóa", icon: "box", uniqueKey: "ma_hang",
+  table: "goods", title: "Danh sách Hàng hóa", icon: "box", uniqueKey: "ma_hang", codePrefix: "HH",
   columns: [
-    { key:"ma_hang", label:"Mã hàng", required:true, type:"text" },
+    { key:"ma_hang", label:"Mã hàng", required:false, type:"text", hint:"Để trống sẽ tự sinh mã" },
     { key:"ten_hang", label:"Tên hàng", required:true, type:"text" },
     { key:"sku", label:"SKU", required:false, type:"text" },
     { key:"dvt", label:"ĐVT", required:true, type:"text" },
@@ -1007,7 +1021,7 @@ const pageGoods = genericCrudPage({
  * 13. TRANG NHÂN VIÊN
  * ==========================================================================*/
 const EMP_COLUMNS = [
-  { key:"ma_nv", label:"Mã NV", required:true, type:"text" },
+  { key:"ma_nv", label:"Mã NV", required:false, type:"text", hint:"Để trống sẽ tự sinh mã" },
   { key:"ten_nv", label:"Tên nhân viên", required:true, type:"text" },
   { key:"sdt", label:"Số điện thoại", required:false, type:"text" },
   { key:"chuc_vu", label:"Chức vụ", required:false, type:"text" },
@@ -1110,8 +1124,10 @@ async function pageEmployees(content){
           if (!pickedBin) { toast("Vui lòng chọn ngân hàng.", "warning"); return; }
           const fd = new FormData(form);
           const bankInfo = AppState.banks.find(b => b.value === pickedBin);
+          let maNv = (fd.get("ma_nv") || "").trim();
+          if (!maNv) maNv = genCode("NV", rows, "ma_nv");
           const payload = {
-            ma_nv: fd.get("ma_nv"), ten_nv: fd.get("ten_nv"), sdt: fd.get("sdt"),
+            ma_nv: maNv, ten_nv: fd.get("ten_nv"), sdt: fd.get("sdt"),
             chuc_vu: fd.get("chuc_vu"), bank_account: fd.get("bank_account"), ghi_chu: fd.get("ghi_chu"),
             bank_bin: pickedBin, bank_name: bankInfo ? bankInfo.label.split(" - ")[1] || bankInfo.label : "",
           };
@@ -1475,7 +1491,6 @@ async function renderProductionEmployee(content){
       <div class="section-title">${ic('plus',null,18)} Thêm dòng sản lượng</div>
       <div class="form-grid">
         <div class="field"><label>Nhân viên</label><div class="readonly-box">${esc(employee.ma_nv)} - ${esc(employee.ten_nv)}</div></div>
-        <div class="field"><label>Ngày<span class="opt">(tùy chọn)</span></label><input class="inp inp-optional" type="date" id="f-date" value="${todayISO()}" /></div>
         <div class="field"><label>Công đoạn<span class="req">*</span></label><div id="f-process-host"></div></div>
         <div class="field"><label>Hàng hóa<span class="req">*</span></label><div id="f-goods-host"></div></div>
         <div class="field"><label>Giá tiền / 1 SP</label><div class="readonly-box" id="f-price">0 đ</div></div>
@@ -1589,7 +1604,7 @@ async function renderProductionEmployee(content){
         employee_id: employee.id, process_id: selProcess, goods_id: selGoods,
         gia_tien: priceOf(selProcess), so_luong: qty,
         ghi_chu: $("#f-note").value || null,
-        entry_date: $("#f-date").value || todayISO(),
+        entry_date: todayISO(),
         created_by: AppState.session.user.id,
       };
       const btn = $("#btn-add-line"); btn.disabled = true;
