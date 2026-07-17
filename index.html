@@ -1011,7 +1011,6 @@ const pageGoods = genericCrudPage({
   columns: [
     { key:"ma_hang", label:"Mã hàng", required:false, type:"text", hint:"Để trống sẽ tự sinh mã" },
     { key:"ten_hang", label:"Tên hàng", required:true, type:"text" },
-    { key:"sku", label:"SKU", required:false, type:"text" },
     { key:"dvt", label:"ĐVT", required:true, type:"text" },
     { key:"ghi_chu", label:"Ghi chú", required:false, type:"text", span2:true },
   ],
@@ -1402,17 +1401,17 @@ async function generatePayrollPdf(batch, items, employee, company){
   y += 2;
 
   const body = items.map((it,i) => [
-    i+1, it.ten_cd_snapshot || "", it.ten_hang_snapshot || "",
+    i+1, it.ten_cd_snapshot || "", it.ten_hang_snapshot || "", it.sku_snapshot || "",
     fmtNumber(it.gia_tien), fmtNumber(it.so_luong), fmtNumber(it.thanh_tien)
   ]);
   doc.autoTable({
     startY: y,
-    head: [["#","Công đoạn","Hàng hóa","Giá tiền","SL","Thành tiền"]],
+    head: [["#","Công đoạn","Hàng hóa","SKU","Giá tiền","SL","Thành tiền"]],
     body,
     theme: "grid",
     styles: { font:"BeVietnamPro", fontSize: 8, cellPadding: 1.6 },
     headStyles: { fillColor: [67,56,202], textColor: 255, fontStyle:"bold", font:"BeVietnamPro" },
-    columnStyles: { 0:{cellWidth:7}, 3:{halign:"right"}, 4:{halign:"right",cellWidth:14}, 5:{halign:"right"} },
+    columnStyles: { 0:{cellWidth:7}, 4:{halign:"right"}, 5:{halign:"right",cellWidth:14}, 6:{halign:"right"} },
     margin: { left: 10, right: 10 },
   });
   y = doc.lastAutoTable.finalY + 6;
@@ -1493,6 +1492,7 @@ async function renderProductionEmployee(content){
         <div class="field"><label>Nhân viên</label><div class="readonly-box">${esc(employee.ma_nv)} - ${esc(employee.ten_nv)}</div></div>
         <div class="field"><label>Công đoạn<span class="req">*</span></label><div id="f-process-host"></div></div>
         <div class="field"><label>Hàng hóa<span class="req">*</span></label><div id="f-goods-host"></div></div>
+        <div class="field"><label>SKU / Size / Màu sắc<span class="opt">(tùy chọn)</span></label><input class="inp inp-optional" id="f-sku" placeholder="VD: Size M, Đỏ..." /></div>
         <div class="field"><label>Giá tiền / 1 SP</label><div class="readonly-box" id="f-price">0 đ</div></div>
         <div class="field"><label>Số lượng<span class="req">*</span></label><input class="inp inp-required" type="number" min="0.01" step="any" id="f-qty" placeholder="Nhập số lượng" /></div>
         <div class="field span2"><label>Thành tiền</label><div class="readonly-box" id="f-total" style="color:var(--success-dark);font-size:15px">0 đ</div></div>
@@ -1505,13 +1505,14 @@ async function renderProductionEmployee(content){
   function renderDraftTable(){
     if (!draftRows.length) return `<div class="empty-state"><div class="icon">${ic('clipboard',null,46)}</div><h3>Chưa có dòng sản lượng nào</h3><p>Nhập ở form phía trên để bắt đầu.</p></div>`;
     return `<div class="table-wrap"><table><thead><tr>
-      <th>Mã dòng</th><th>Ngày</th><th>Công đoạn</th><th>Hàng hóa</th><th class="text-right">Giá tiền</th><th class="text-right">SL</th><th class="text-right">Thành tiền</th><th>Ghi chú</th><th class="text-center">Thao tác</th>
+      <th>Mã dòng</th><th>Ngày</th><th>Công đoạn</th><th>Hàng hóa</th><th>SKU</th><th class="text-right">Giá tiền</th><th class="text-right">SL</th><th class="text-right">Thành tiền</th><th>Ghi chú</th><th class="text-center">Thao tác</th>
     </tr></thead><tbody>
       ${draftRows.map(r => `<tr>
         <td class="muted">${shortId(r.id)}</td>
         <td>${fmtDateVN(r.entry_date)}</td>
         <td>${esc(r.processes?.ten_cd)}</td>
         <td>${esc(r.goods?.ten_hang)}</td>
+        <td class="muted">${esc(r.sku)}</td>
         <td class="text-right">${fmtNumber(r.gia_tien)}</td>
         <td class="text-right">${fmtNumber(r.so_luong)}</td>
         <td class="text-right" style="font-weight:700">${fmtNumber(r.thanh_tien)}</td>
@@ -1545,9 +1546,9 @@ async function renderProductionEmployee(content){
   async function viewBatchDetail(batchId){
     const { data: items } = await sb.from("payroll_items").select("*").eq("batch_id", batchId).order("entry_date");
     const bodyHtml = `<div class="table-wrap"><table><thead><tr>
-      <th>Ngày</th><th>Công đoạn</th><th>Hàng hóa</th><th class="text-right">Giá tiền</th><th class="text-right">SL</th><th class="text-right">Thành tiền</th>
+      <th>Ngày</th><th>Công đoạn</th><th>Hàng hóa</th><th>SKU</th><th class="text-right">Giá tiền</th><th class="text-right">SL</th><th class="text-right">Thành tiền</th>
     </tr></thead><tbody>
-      ${(items||[]).map(it => `<tr><td>${fmtDateVN(it.entry_date)}</td><td>${esc(it.ten_cd_snapshot)}</td><td>${esc(it.ten_hang_snapshot)}</td>
+      ${(items||[]).map(it => `<tr><td>${fmtDateVN(it.entry_date)}</td><td>${esc(it.ten_cd_snapshot)}</td><td>${esc(it.ten_hang_snapshot)}</td><td class="muted">${esc(it.sku_snapshot)}</td>
         <td class="text-right">${fmtNumber(it.gia_tien)}</td><td class="text-right">${fmtNumber(it.so_luong)}</td><td class="text-right">${fmtNumber(it.thanh_tien)}</td></tr>`).join("")}
     </tbody></table></div>`;
     openModal({ title: "Chi tiết phiếu lương", bodyHtml, large:true, footHtml:`<button class="btn btn-primary" data-close-modal>Đóng</button>`, onMount:(overlay)=>{overlay.querySelector('[data-close-modal]').addEventListener('click',()=>overlay.querySelector('[data-close]').click());} });
@@ -1603,6 +1604,7 @@ async function renderProductionEmployee(content){
       const payload = {
         employee_id: employee.id, process_id: selProcess, goods_id: selGoods,
         gia_tien: priceOf(selProcess), so_luong: qty,
+        sku: $("#f-sku").value || null,
         ghi_chu: $("#f-note").value || null,
         entry_date: todayISO(),
         created_by: AppState.session.user.id,
@@ -1612,7 +1614,7 @@ async function renderProductionEmployee(content){
       btn.disabled = false;
       if (error) { toast("Lỗi thêm dòng: " + error.message, "error"); return; }
       toast("Đã thêm dòng sản lượng.", "success");
-      $("#f-qty").value = ""; $("#f-note").value = ""; $("#f-total").textContent = "0 đ";
+      $("#f-qty").value = ""; $("#f-note").value = ""; $("#f-sku").value = ""; $("#f-total").textContent = "0 đ";
       await loadDraft();
       paint();
     });
@@ -1644,12 +1646,14 @@ async function renderProductionEmployee(content){
 /* ---------------------- ADMIN ---------------------- */
 async function renderProductionAdmin(content){
   let tab = "draft";
-  let filters = { employeeId: "", dateFrom: startOfMonthISO(), dateTo: todayISO(), quick: "month" };
+  let filters = { employeeId: "", processId: "", goodsId: "", dateFrom: startOfMonthISO(), dateTo: todayISO(), quick: "month" };
   let draftRows = [], historyRows = [];
 
   async function loadDraft(){
     let q = sb.from("production_entries").select("*, employees(ma_nv,ten_nv), processes(ten_cd), goods(ten_hang)").order("entry_date",{ascending:false});
     if (filters.employeeId) q = q.eq("employee_id", filters.employeeId);
+    if (filters.processId) q = q.eq("process_id", filters.processId);
+    if (filters.goodsId) q = q.eq("goods_id", filters.goodsId);
     if (filters.dateFrom) q = q.gte("entry_date", filters.dateFrom);
     if (filters.dateTo) q = q.lte("entry_date", filters.dateTo);
     const { data, error } = await q;
@@ -1673,6 +1677,10 @@ async function renderProductionAdmin(content){
     ];
     return `<div class="filter-bar">
       <div class="field"><label>Nhân viên</label><div id="filter-emp-host"></div></div>
+      ${tab==='draft' ? `
+        <div class="field"><label>Công đoạn</label><div id="filter-process-host"></div></div>
+        <div class="field"><label>Hàng hóa</label><div id="filter-goods-host"></div></div>
+      ` : ""}
       <div class="field"><label>Khoảng thời gian</label><div class="chip-group">
         ${chips.map(c => `<div class="chip ${filters.quick===c.key?'active':''}" data-quick="${c.key}">${c.label}</div>`).join("")}
       </div></div>
@@ -1687,7 +1695,7 @@ async function renderProductionAdmin(content){
   function renderDraftTable(){
     if (!draftRows.length) return `<div class="empty-state"><div class="icon">${ic('clipboard',null,46)}</div><h3>Không có dữ liệu</h3><p>Không có dòng sản lượng nào khớp bộ lọc.</p></div>`;
     return `<div class="table-wrap"><table><thead><tr>
-      <th>Mã dòng</th><th>Ngày</th><th>Nhân viên</th><th>Công đoạn</th><th>Hàng hóa</th><th class="text-right">Giá tiền</th><th class="text-right">SL</th><th class="text-right">Thành tiền</th><th>Ghi chú</th><th class="text-center">Thao tác</th>
+      <th>Mã dòng</th><th>Ngày</th><th>Nhân viên</th><th>Công đoạn</th><th>Hàng hóa</th><th>SKU</th><th class="text-right">Giá tiền</th><th class="text-right">SL</th><th class="text-right">Thành tiền</th><th>Ghi chú</th><th class="text-center">Thao tác</th>
     </tr></thead><tbody>
       ${draftRows.map(r => `<tr>
         <td class="muted">${shortId(r.id)}</td>
@@ -1695,6 +1703,7 @@ async function renderProductionAdmin(content){
         <td><b>${esc(r.employees?.ma_nv)}</b> - ${esc(r.employees?.ten_nv)}</td>
         <td>${esc(r.processes?.ten_cd)}</td>
         <td>${esc(r.goods?.ten_hang)}</td>
+        <td class="muted">${esc(r.sku)}</td>
         <td class="text-right">${fmtNumber(r.gia_tien)}</td>
         <td class="text-right">${fmtNumber(r.so_luong)}</td>
         <td class="text-right" style="font-weight:700">${fmtNumber(r.thanh_tien)}</td>
@@ -1748,9 +1757,9 @@ async function renderProductionAdmin(content){
   async function viewBatchDetail(batchId){
     const { data: items } = await sb.from("payroll_items").select("*").eq("batch_id", batchId).order("entry_date");
     const bodyHtml = `<div class="table-wrap"><table><thead><tr>
-      <th>Ngày</th><th>Công đoạn</th><th>Hàng hóa</th><th class="text-right">Giá tiền</th><th class="text-right">SL</th><th class="text-right">Thành tiền</th>
+      <th>Ngày</th><th>Công đoạn</th><th>Hàng hóa</th><th>SKU</th><th class="text-right">Giá tiền</th><th class="text-right">SL</th><th class="text-right">Thành tiền</th>
     </tr></thead><tbody>
-      ${(items||[]).map(it => `<tr><td>${fmtDateVN(it.entry_date)}</td><td>${esc(it.ten_cd_snapshot)}</td><td>${esc(it.ten_hang_snapshot)}</td>
+      ${(items||[]).map(it => `<tr><td>${fmtDateVN(it.entry_date)}</td><td>${esc(it.ten_cd_snapshot)}</td><td>${esc(it.ten_hang_snapshot)}</td><td class="muted">${esc(it.sku_snapshot)}</td>
         <td class="text-right">${fmtNumber(it.gia_tien)}</td><td class="text-right">${fmtNumber(it.so_luong)}</td><td class="text-right">${fmtNumber(it.thanh_tien)}</td></tr>`).join("")}
     </tbody></table></div>`;
     openModal({ title: "Chi tiết phiếu lương", bodyHtml, large:true, footHtml:`<button class="btn btn-primary" data-close-modal>Đóng</button>`, onMount:(overlay)=>{overlay.querySelector('[data-close-modal]').addEventListener('click',()=>overlay.querySelector('[data-close]').click());} });
@@ -1789,6 +1798,15 @@ async function renderProductionAdmin(content){
     const empOptions = AppState.employees.map(e => ({ value:e.id, label:`${e.ma_nv} - ${e.ten_nv}` }));
     const empSel = createSearchableSelect({ options: empOptions, value: filters.employeeId, allowEmptyLabel:"Tất cả nhân viên", placeholder:"Tất cả nhân viên", onChange: v => filters.employeeId = v });
     $("#filter-emp-host").appendChild(empSel);
+
+    if (tab === "draft") {
+      const procOptions = AppState.processes.map(p => ({ value:p.id, label:`${p.ma_cd} - ${p.ten_cd}` }));
+      const procSel = createSearchableSelect({ options: procOptions, value: filters.processId, allowEmptyLabel:"Tất cả công đoạn", placeholder:"Tất cả công đoạn", onChange: v => filters.processId = v });
+      $("#filter-process-host").appendChild(procSel);
+      const goodsOptions = AppState.goods.map(g => ({ value:g.id, label:`${g.ma_hang} - ${g.ten_hang}` }));
+      const goodsSel = createSearchableSelect({ options: goodsOptions, value: filters.goodsId, allowEmptyLabel:"Tất cả hàng hóa", placeholder:"Tất cả hàng hóa", onChange: v => filters.goodsId = v });
+      $("#filter-goods-host").appendChild(goodsSel);
+    }
 
     $$("[data-quick]", content).forEach(c => c.addEventListener("click", () => {
       filters.quick = c.dataset.quick;
