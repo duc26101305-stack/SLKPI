@@ -429,8 +429,11 @@ function confirmDialog(message, opts){
       footHtml: `<button class="btn" data-cancel>Hủy</button>
         <button class="btn ${opts.danger?'btn-danger':'btn-primary'}" data-ok>${esc(opts.okText||"Xác nhận")}</button>`,
       onMount: (overlay, closeFn) => {
-        overlay.querySelector("[data-cancel]").addEventListener("click", ()=>{ closeFn(); resolve(false); });
-        overlay.querySelector("[data-ok]").addEventListener("click", ()=>{ closeFn(); resolve(true); });
+        // QUAN TRỌNG: phải resolve() TRƯỚC khi closeFn(), vì closeFn() bên trong
+        // sẽ tự gọi onClose() -> resolve(false). Nếu gọi closeFn() trước, tín hiệu
+        // "hủy" từ onClose sẽ luôn thắng trước, khiến nút "Xóa"/"Đồng ý" không bao giờ có tác dụng.
+        overlay.querySelector("[data-cancel]").addEventListener("click", ()=>{ resolve(false); closeFn(); });
+        overlay.querySelector("[data-ok]").addEventListener("click", ()=>{ resolve(true); closeFn(); });
       },
       onClose: () => resolve(false)
     });
