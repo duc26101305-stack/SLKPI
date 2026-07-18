@@ -578,7 +578,7 @@ function parseExcelFile(file){
  * 8. DATA LOADERS
  * ==========================================================================*/
 async function loadEmployees(){
-  const { data, error } = await sb.from("employees").select("*").order("created_at", { ascending: false });
+  const { data, error } = await sb.from("employees").select("*").is("deleted_at", null).order("created_at", { ascending: false });
   if (error) { toast("Lỗi tải nhân viên: "+error.message, "error"); return []; }
   AppState.employees = data || [];
   return AppState.employees;
@@ -831,6 +831,68 @@ function fieldInputHtml(f, val){
   return `<div class="field ${f.span2?'span2':''}"><label>${esc(f.label)}${reqMark}</label>${input}${hint}</div>`;
 }
 
+/* ============================================================================
+ * 8B. QUẢN LÝ DANH SÁCH SKU CHUNG (dùng chung cho mọi hàng hóa)
+ * ==========================================================================*/
+async function openGlobalSkuManager(){
+  let skus = [];
+  async function loadSkus(){
+    const { data, error } = await sb.from("skus").select("*").order("sku");
+    if (error) { toast("Lỗi tải SKU: " + error.message, "error"); return; }
+    skus = data || [];
+  }
+  await loadSkus();
+  function listHtml(){
+    if (!skus.length) return `<p class="helper">Chưa có SKU nào. Thêm SKU (size, màu sắc...) để nhân viên chọn khi nhập sản lượng.</p>`;
+    return `<div class="table-wrap"><table><thead><tr><th>SKU</th><th class="text-center">Thao tác</th></tr></thead><tbody>
+      ${skus.map(s => `<tr><td>${esc(s.sku)}</td><td class="text-center"><button class="icon-btn red" data-del-sku="${s.id}" title="Xóa">${ic('trash')}</button></td></tr>`).join("")}
+    </tbody></table></div>`;
+  }
+  const bodyHtml = `
+    <div class="form-grid" style="margin-bottom:14px">
+      <div class="field span2"><label>Thêm SKU mới<span class="opt">(VD: S, M, L, Đỏ, Xanh...)</span></label>
+        <div style="display:flex;gap:8px">
+          <input class="inp inp-optional" id="new-sku-input" placeholder="Nhập SKU rồi bấm Thêm" style="flex:1" />
+          <button class="btn btn-primary" id="btn-add-sku">${ic('plus')} Thêm</button>
+        </div>
+      </div>
+    </div>
+    <p class="helper" style="margin-bottom:10px">Danh sách SKU này dùng chung cho tất cả hàng hóa — khi nhân viên nhập sản lượng, họ chọn Hàng hóa và chọn SKU độc lập với nhau từ danh sách này.</p>
+    <div id="sku-list-host">${listHtml()}</div>
+  `;
+  openModal({
+    title: "Quản lý danh sách SKU",
+    bodyHtml,
+    footHtml: `<button class="btn btn-primary" data-close-modal>Đóng</button>`,
+    onMount: (overlay, closeFn) => {
+      overlay.querySelector('[data-close-modal]').addEventListener('click', closeFn);
+      function bindDel(){
+        overlay.querySelectorAll("[data-del-sku]").forEach(b => b.addEventListener("click", async () => {
+          const ok = await confirmDialog("Xóa SKU này?", { danger:true, okText:"Xóa" });
+          if (!ok) return;
+          const { error } = await sb.from("skus").delete().eq("id", b.dataset.delSku);
+          if (error) { toast("Lỗi: " + error.message, "error"); return; }
+          await loadSkus();
+          overlay.querySelector("#sku-list-host").innerHTML = listHtml();
+          bindDel();
+        }));
+      }
+      bindDel();
+      overlay.querySelector("#btn-add-sku").addEventListener("click", async () => {
+        const inp = overlay.querySelector("#new-sku-input");
+        const val = inp.value.trim();
+        if (!val) { toast("Vui lòng nhập SKU.", "warning"); return; }
+        const { error } = await sb.from("skus").insert({ sku: val });
+        if (error) { toast("Lỗi thêm SKU: " + error.message, "error"); return; }
+        inp.value = "";
+        await loadSkus();
+        overlay.querySelector("#sku-list-host").innerHTML = listHtml();
+        bindDel();
+      });
+    }
+  });
+}
+
 function genericCrudPage(config){
   // config: table, title, icon, uniqueKey, columns:[{key,label,required,type,width}], extraCols(render fn), emptyIcon
   return async function(content){
@@ -867,6 +929,7 @@ function genericCrudPage(config){
           </div>
         </div>
         <div class="right">
+          ${config.enableSkuManage ? `<button class="btn" id="btn-manage-sku">${ic('layers')} Quản lý SKU</button>` : ""}
           <button class="btn" id="btn-template">${ic('download')} Tải template</button>
           <button class="btn" id="btn-import">${ic('upload')} Nhập Excel</button>
           <button class="btn" id="btn-export">${ic('sheet')} Xuất Excel</button>
@@ -950,6 +1013,9 @@ function genericCrudPage(config){
 
     function bindToolbar(){
       $("#btn-add", content).addEventListener("click", () => openForm(null));
+      if (config.enableSkuManage) {
+        $("#btn-manage-sku", content).addEventListener("click", () => openGlobalSkuManager());
+      }
       $("#btn-template", content).addEventListener("click", () => {
         const sample = {}; config.columns.forEach(c => sample[c.key] = c.type==="number" ? 1000 : "VD");
         downloadTemplate(config.columns, `Template_${config.table}.xlsx`, sample);
@@ -1007,7 +1073,7 @@ const pageProcesses = genericCrudPage({
 });
 
 const pageGoods = genericCrudPage({
-  table: "goods", title: "Danh sách Hàng hóa", icon: "box", uniqueKey: "ma_hang", codePrefix: "HH",
+  table: "goods", title: "Danh sách Hàng hóa", icon: "box", uniqueKey: "ma_hang", codePrefix: "HH", enableSkuManage: true,
   columns: [
     { key:"ma_hang", label:"Mã hàng", required:false, type:"text", hint:"Để trống sẽ tự sinh mã" },
     { key:"ten_hang", label:"Tên hàng", required:true, type:"text" },
@@ -1285,13 +1351,23 @@ async function pageEmployees(content){
     $$("[data-togglelock]", content).forEach(b => b.addEventListener("click", () => toggleLock(rows.find(r=>r.id===b.dataset.togglelock))));
     $$("[data-del]", content).forEach(b => b.addEventListener("click", async () => {
       const emp = rows.find(r => r.id === b.dataset.del);
-      const ok = await confirmDialog(`Xóa nhân viên "${emp.ten_nv}"? Toàn bộ dữ liệu sản lượng liên quan cũng sẽ bị xóa.`, { danger:true, okText:"Xóa" });
+      const ok = await confirmDialog(`Xóa nhân viên "${emp.ten_nv}" khỏi danh sách? Toàn bộ dữ liệu sản lượng và lịch sử lương của nhân viên này vẫn được giữ nguyên, chỉ ẩn khỏi mục Nhân viên.`, { danger:true, okText:"Xóa" });
       if (!ok) return;
-      const { error } = await sb.from("employees").delete().eq("id", emp.id);
-      if (error) { toast("Lỗi xóa: " + error.message, "error"); return; }
-      toast("Đã xóa nhân viên.", "success");
-      rows = await loadEmployees();
-      paint();
+      try {
+        if (emp.username) {
+          const { data: prof } = await sb.from("profiles").select("id").eq("employee_id", emp.id).maybeSingle();
+          if (prof) {
+            await sb.functions.invoke("manage-employee-account", { body: { action:"set_active", user_id: prof.id, is_active: false } });
+          }
+        }
+        const { error } = await sb.from("employees").update({ deleted_at: new Date().toISOString(), is_active: false }).eq("id", emp.id);
+        if (error) throw error;
+        toast("Đã xóa nhân viên khỏi danh sách.", "success");
+        rows = await loadEmployees();
+        paint();
+      } catch(err){
+        toast("Lỗi xóa: " + err.message, "error");
+      }
     }));
     $("#search-box", content).addEventListener("input", debounce((e) => {
       const f = removeVNTones(e.target.value).toLowerCase();
@@ -1303,11 +1379,22 @@ async function pageEmployees(content){
       $$("[data-togglelock]", content).forEach(b => b.addEventListener("click", () => toggleLock(rows.find(r=>r.id===b.dataset.togglelock))));
       $$("[data-del]", content).forEach(b => b.addEventListener("click", async () => {
         const emp = rows.find(r => r.id === b.dataset.del);
-        const ok = await confirmDialog(`Xóa nhân viên "${emp.ten_nv}"?`, { danger:true, okText:"Xóa" });
+        const ok = await confirmDialog(`Xóa nhân viên "${emp.ten_nv}" khỏi danh sách? Toàn bộ dữ liệu sản lượng và lịch sử lương của nhân viên này vẫn được giữ nguyên, chỉ ẩn khỏi mục Nhân viên.`, { danger:true, okText:"Xóa" });
         if (!ok) return;
-        const { error } = await sb.from("employees").delete().eq("id", emp.id);
-        if (error) { toast("Lỗi xóa: " + error.message, "error"); return; }
-        rows = await loadEmployees(); paint();
+        try {
+          if (emp.username) {
+            const { data: prof } = await sb.from("profiles").select("id").eq("employee_id", emp.id).maybeSingle();
+            if (prof) {
+              await sb.functions.invoke("manage-employee-account", { body: { action:"set_active", user_id: prof.id, is_active: false } });
+            }
+          }
+          const { error } = await sb.from("employees").update({ deleted_at: new Date().toISOString(), is_active: false }).eq("id", emp.id);
+          if (error) throw error;
+          toast("Đã xóa nhân viên khỏi danh sách.", "success");
+          rows = await loadEmployees(); paint();
+        } catch(err){
+          toast("Lỗi xóa: " + err.message, "error");
+        }
       }));
     }, 250));
   }
@@ -1348,7 +1435,8 @@ async function generatePayrollPdf(batch, items, employee, company){
   doc.setFont("BeVietnamPro", "normal");
 
   const pageW = doc.internal.pageSize.getWidth();
-  const cornerSize = 20; // kích thước khung logo / QR góc trên (mm)
+  const logoSize = 20; // kích thước khung logo góc trên (mm)
+  const qrSize = 26;   // kích thước mã QR góc trên (mm) — đã tăng 30% so với 20mm ban đầu
 
   // Chuẩn bị ảnh logo công ty & mã QR chuyển khoản TRƯỚC khi vẽ (vì là ảnh tải từ mạng, cần await)
   let logoDataUrl = null;
@@ -1367,13 +1455,11 @@ async function generatePayrollPdf(batch, items, employee, company){
 
   // Logo công ty — góc TRÁI trên
   if (logoDataUrl) {
-    try { doc.addImage(logoDataUrl, "PNG", 10, 8, cornerSize, cornerSize); } catch(e){ /* ảnh lỗi định dạng thì bỏ qua */ }
+    try { doc.addImage(logoDataUrl, "PNG", 10, 8, logoSize, logoSize); } catch(e){ /* ảnh lỗi định dạng thì bỏ qua */ }
   }
-  // Mã QR chuyển khoản — góc PHẢI trên
+  // Mã QR chuyển khoản — góc PHẢI trên (không kèm dòng nội dung chuyển khoản bên dưới nữa)
   if (qrDataUrl) {
-    doc.addImage(qrDataUrl, "PNG", pageW - cornerSize - 10, 8, cornerSize, cornerSize);
-    doc.setFont("BeVietnamPro","normal"); doc.setFontSize(6.3);
-    doc.text("Quét mã chuyển khoản", pageW - cornerSize/2 - 10, 8 + cornerSize + 3.2, { align:"center" });
+    doc.addImage(qrDataUrl, "PNG", pageW - qrSize - 10, 8, qrSize, qrSize);
   }
 
   let y = 14;
@@ -1384,7 +1470,7 @@ async function generatePayrollPdf(batch, items, employee, company){
   doc.setFont("BeVietnamPro","normal"); doc.setFontSize(8.5);
   if (company?.dia_chi) { doc.text(String(company.dia_chi), pageW/2, y, { align:"center" }); y += 4; }
   if (company?.sdt) { doc.text("ĐT: " + company.sdt, pageW/2, y, { align:"center" }); y += 4; }
-  y = Math.max(y, 8 + cornerSize + (qrDataUrl ? 6 : 0)) + 3; // tránh đè lên logo/QR góc trên
+  y = Math.max(y, 8 + Math.max(logoSize, qrSize)) + 3; // tránh đè lên logo/QR góc trên
   doc.setDrawColor(200); doc.line(10, y, pageW-10, y); y += 7;
 
   doc.setFont("BeVietnamPro","bold"); doc.setFontSize(14);
@@ -1421,12 +1507,6 @@ async function generatePayrollPdf(batch, items, employee, company){
   doc.setFontSize(12);
   doc.text(`TỔNG TIỀN: ${fmtCurrency(batch.tong_tien)}`, 10, y);
   y += 8;
-
-  if (qrDataUrl) {
-    doc.setFont("BeVietnamPro","normal"); doc.setFontSize(8);
-    doc.text(`Nội dung chuyển khoản: ${batch.ma_phieu}`, 10, y);
-    y += 6;
-  }
 
   doc.setFont("BeVietnamPro","normal"); doc.setFontSize(9);
   doc.text("Người lập phiếu", 30, y + 16, { align:"center" });
@@ -1469,7 +1549,7 @@ async function renderProductionEmployee(content){
   }
   let tab = "draft";
   let draftRows = [], historyRows = [];
-  let selProcess = "", selGoods = "";
+  let selProcess = "", selGoods = "", selSku = "";
 
   async function loadDraft(){
     const { data } = await sb.from("production_entries").select("*, processes(ten_cd), goods(ten_hang)").eq("employee_id", employee.id).order("created_at",{ascending:false});
@@ -1492,7 +1572,7 @@ async function renderProductionEmployee(content){
         <div class="field"><label>Nhân viên</label><div class="readonly-box">${esc(employee.ma_nv)} - ${esc(employee.ten_nv)}</div></div>
         <div class="field"><label>Công đoạn<span class="req">*</span></label><div id="f-process-host"></div></div>
         <div class="field"><label>Hàng hóa<span class="req">*</span></label><div id="f-goods-host"></div></div>
-        <div class="field"><label>SKU / Size / Màu sắc<span class="opt">(tùy chọn)</span></label><input class="inp inp-optional" id="f-sku" placeholder="VD: Size M, Đỏ..." /></div>
+        <div class="field"><label>SKU / Size / Màu sắc<span class="opt">(tùy chọn)</span></label><div id="f-sku-host"></div></div>
         <div class="field"><label>Giá tiền / 1 SP</label><div class="readonly-box" id="f-price">0 đ</div></div>
         <div class="field"><label>Số lượng<span class="req">*</span></label><input class="inp inp-required" type="number" min="0.01" step="any" id="f-qty" placeholder="Nhập số lượng" /></div>
         <div class="field span2"><label>Thành tiền</label><div class="readonly-box" id="f-total" style="color:var(--success-dark);font-size:15px">0 đ</div></div>
@@ -1589,6 +1669,21 @@ async function renderProductionEmployee(content){
     const goodsSel = createSearchableSelect({ options:goodsOptions, value:selGoods, required:true, placeholder:"-- Chọn hàng hóa --", onChange: v => { selGoods = v; }});
     $("#f-goods-host").appendChild(goodsSel);
 
+    async function loadSkuSelect(){
+      const host = $("#f-sku-host");
+      const { data } = await sb.from("skus").select("*").eq("is_active", true).order("sku");
+      const skuOptions = (data || []).map(s => ({ value: s.sku, label: s.sku }));
+      host.innerHTML = "";
+      const skuSel = createSearchableSelect({
+        options: skuOptions, value: selSku,
+        allowEmptyLabel: skuOptions.length ? "Không chọn SKU" : undefined,
+        placeholder: skuOptions.length ? "-- Chọn SKU --" : "Chưa có SKU nào, vào mục Hàng hóa để thêm",
+        onChange: v => selSku = v,
+      });
+      host.appendChild(skuSel);
+    }
+    loadSkuSelect();
+
     function updateTotal(){
       const qty = Number($("#f-qty").value || 0);
       const total = qty * priceOf(selProcess);
@@ -1604,7 +1699,7 @@ async function renderProductionEmployee(content){
       const payload = {
         employee_id: employee.id, process_id: selProcess, goods_id: selGoods,
         gia_tien: priceOf(selProcess), so_luong: qty,
-        sku: $("#f-sku").value || null,
+        sku: selSku || null,
         ghi_chu: $("#f-note").value || null,
         entry_date: todayISO(),
         created_by: AppState.session.user.id,
@@ -1614,7 +1709,8 @@ async function renderProductionEmployee(content){
       btn.disabled = false;
       if (error) { toast("Lỗi thêm dòng: " + error.message, "error"); return; }
       toast("Đã thêm dòng sản lượng.", "success");
-      $("#f-qty").value = ""; $("#f-note").value = ""; $("#f-sku").value = ""; $("#f-total").textContent = "0 đ";
+      $("#f-qty").value = ""; $("#f-note").value = ""; $("#f-total").textContent = "0 đ";
+      selSku = "";
       await loadDraft();
       paint();
     });
