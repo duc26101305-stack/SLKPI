@@ -1107,6 +1107,50 @@ async function pageEmployees(content){
     return r.is_active ? badge("Hoạt động", "success") : badge("Đã khóa", "danger");
   }
 
+  // Hàm xóa (ẩn) nhân viên — dùng chung cho mọi nút Xóa, có log chi tiết từng bước
+  // để dễ chẩn đoán nếu có lỗi xảy ra (xem trong Console F12).
+  async function handleDeleteClick(id){
+    console.log("[XOA-NV] Bắt đầu, id =", id);
+    const emp = rows.find(r => r.id === id);
+    if (!emp) { console.error("[XOA-NV] Không tìm thấy nhân viên với id này trong danh sách hiện tại."); toast("Lỗi: không tìm thấy nhân viên (vui lòng tải lại trang).", "error"); return; }
+    let ok;
+    try {
+      ok = await confirmDialog(`Xóa nhân viên "${emp.ten_nv}" khỏi danh sách? Toàn bộ dữ liệu sản lượng và lịch sử lương của nhân viên này vẫn được giữ nguyên, chỉ ẩn khỏi mục Nhân viên.`, { danger:true, okText:"Xóa" });
+    } catch(dialogErr){
+      console.error("[XOA-NV] Lỗi khi mở hộp thoại xác nhận:", dialogErr);
+      toast("Lỗi mở hộp thoại xác nhận: " + dialogErr.message, "error");
+      return;
+    }
+    console.log("[XOA-NV] Kết quả xác nhận (ok) =", ok);
+    if (!ok) return;
+    try {
+      if (emp.username) {
+        console.log("[XOA-NV] Nhân viên có tài khoản, đang vô hiệu hóa đăng nhập...");
+        const { data: prof, error: profErr } = await sb.from("profiles").select("id").eq("employee_id", emp.id).maybeSingle();
+        console.log("[XOA-NV] profile:", prof, "profErr:", profErr);
+        if (prof) {
+          const fnRes = await sb.functions.invoke("manage-employee-account", { body: { action:"set_active", user_id: prof.id, is_active: false } });
+          console.log("[XOA-NV] Kết quả Edge Function manage-employee-account:", fnRes);
+        }
+      }
+      console.log("[XOA-NV] Đang gửi update deleted_at cho id =", emp.id);
+      const { data, error } = await sb.from("employees").update({ deleted_at: new Date().toISOString(), is_active: false }).eq("id", emp.id).select();
+      console.log("[XOA-NV] Kết quả update — data:", data, "error:", error);
+      if (error) throw error;
+      if (!data || data.length === 0) {
+        console.error("[XOA-NV] Update chạy thành công nhưng KHÔNG có dòng nào bị thay đổi (data rỗng). Có thể do quyền RLS.");
+        toast("Không xóa được: không có quyền hoặc không tìm thấy bản ghi. Xem Console để biết chi tiết.", "error");
+        return;
+      }
+      toast("Đã xóa nhân viên khỏi danh sách.", "success");
+      rows = await loadEmployees();
+      paint();
+    } catch(err){
+      console.error("[XOA-NV] LỖI:", err);
+      toast("Lỗi xóa: " + err.message, "error");
+    }
+  }
+
   function renderTable(list){
     if (!list.length) {
       return `<div class="empty-state"><div class="icon">${ic('users',null,46)}</div><h3>Chưa có nhân viên</h3><p>Bấm "Thêm mới" để thêm nhân viên đầu tiên.</p></div>`;
@@ -1349,26 +1393,7 @@ async function pageEmployees(content){
     $$("[data-createacc]", content).forEach(b => b.addEventListener("click", () => openCreateAccountForm(rows.find(r=>r.id===b.dataset.createacc))));
     $$("[data-resetpw]", content).forEach(b => b.addEventListener("click", () => openResetPasswordForm(rows.find(r=>r.id===b.dataset.resetpw))));
     $$("[data-togglelock]", content).forEach(b => b.addEventListener("click", () => toggleLock(rows.find(r=>r.id===b.dataset.togglelock))));
-    $$("[data-del]", content).forEach(b => b.addEventListener("click", async () => {
-      const emp = rows.find(r => r.id === b.dataset.del);
-      const ok = await confirmDialog(`Xóa nhân viên "${emp.ten_nv}" khỏi danh sách? Toàn bộ dữ liệu sản lượng và lịch sử lương của nhân viên này vẫn được giữ nguyên, chỉ ẩn khỏi mục Nhân viên.`, { danger:true, okText:"Xóa" });
-      if (!ok) return;
-      try {
-        if (emp.username) {
-          const { data: prof } = await sb.from("profiles").select("id").eq("employee_id", emp.id).maybeSingle();
-          if (prof) {
-            await sb.functions.invoke("manage-employee-account", { body: { action:"set_active", user_id: prof.id, is_active: false } });
-          }
-        }
-        const { error } = await sb.from("employees").update({ deleted_at: new Date().toISOString(), is_active: false }).eq("id", emp.id);
-        if (error) throw error;
-        toast("Đã xóa nhân viên khỏi danh sách.", "success");
-        rows = await loadEmployees();
-        paint();
-      } catch(err){
-        toast("Lỗi xóa: " + err.message, "error");
-      }
-    }));
+    $$("[data-del]", content).forEach(b => b.addEventListener("click", () => handleDeleteClick(b.dataset.del)));
     $("#search-box", content).addEventListener("input", debounce((e) => {
       const f = removeVNTones(e.target.value).toLowerCase();
       const filtered = !f ? rows : rows.filter(r => [r.ma_nv,r.ten_nv,r.sdt,r.chuc_vu].some(v => removeVNTones(String(v||"")).toLowerCase().includes(f)));
@@ -1377,25 +1402,7 @@ async function pageEmployees(content){
       $$("[data-createacc]", content).forEach(b => b.addEventListener("click", () => openCreateAccountForm(rows.find(r=>r.id===b.dataset.createacc))));
       $$("[data-resetpw]", content).forEach(b => b.addEventListener("click", () => openResetPasswordForm(rows.find(r=>r.id===b.dataset.resetpw))));
       $$("[data-togglelock]", content).forEach(b => b.addEventListener("click", () => toggleLock(rows.find(r=>r.id===b.dataset.togglelock))));
-      $$("[data-del]", content).forEach(b => b.addEventListener("click", async () => {
-        const emp = rows.find(r => r.id === b.dataset.del);
-        const ok = await confirmDialog(`Xóa nhân viên "${emp.ten_nv}" khỏi danh sách? Toàn bộ dữ liệu sản lượng và lịch sử lương của nhân viên này vẫn được giữ nguyên, chỉ ẩn khỏi mục Nhân viên.`, { danger:true, okText:"Xóa" });
-        if (!ok) return;
-        try {
-          if (emp.username) {
-            const { data: prof } = await sb.from("profiles").select("id").eq("employee_id", emp.id).maybeSingle();
-            if (prof) {
-              await sb.functions.invoke("manage-employee-account", { body: { action:"set_active", user_id: prof.id, is_active: false } });
-            }
-          }
-          const { error } = await sb.from("employees").update({ deleted_at: new Date().toISOString(), is_active: false }).eq("id", emp.id);
-          if (error) throw error;
-          toast("Đã xóa nhân viên khỏi danh sách.", "success");
-          rows = await loadEmployees(); paint();
-        } catch(err){
-          toast("Lỗi xóa: " + err.message, "error");
-        }
-      }));
+      $$("[data-del]", content).forEach(b => b.addEventListener("click", () => handleDeleteClick(b.dataset.del)));
     }, 250));
   }
 
