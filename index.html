@@ -1675,9 +1675,9 @@ async function renderProductionEmployee(content){
       $("#f-price").textContent = fmtCurrency(priceOf(v));
       updateTotal();
     }});
-    $("#f-process-host").appendChild(procSel);
+    $("#f-process-host").innerHTML = ""; $("#f-process-host").appendChild(procSel);
     const goodsSel = createSearchableSelect({ options:goodsOptions, value:selGoods, required:true, placeholder:"-- Chọn hàng hóa --", onChange: v => { selGoods = v; }});
-    $("#f-goods-host").appendChild(goodsSel);
+    $("#f-goods-host").innerHTML = ""; $("#f-goods-host").appendChild(goodsSel);
 
     async function loadSkuSelect(){
       const host = $("#f-sku-host");
@@ -1903,15 +1903,15 @@ async function renderProductionAdmin(content){
 
     const empOptions = AppState.employees.map(e => ({ value:e.id, label:`${e.ma_nv} - ${e.ten_nv}` }));
     const empSel = createSearchableSelect({ options: empOptions, value: filters.employeeId, allowEmptyLabel:"Tất cả nhân viên", placeholder:"Tất cả nhân viên", onChange: v => filters.employeeId = v });
-    $("#filter-emp-host").appendChild(empSel);
+    $("#filter-emp-host").innerHTML = ""; $("#filter-emp-host").appendChild(empSel);
 
     if (tab === "draft") {
       const procOptions = AppState.processes.map(p => ({ value:p.id, label:`${p.ma_cd} - ${p.ten_cd}` }));
       const procSel = createSearchableSelect({ options: procOptions, value: filters.processId, allowEmptyLabel:"Tất cả công đoạn", placeholder:"Tất cả công đoạn", onChange: v => filters.processId = v });
-      $("#filter-process-host").appendChild(procSel);
+      $("#filter-process-host").innerHTML = ""; $("#filter-process-host").appendChild(procSel);
       const goodsOptions = AppState.goods.map(g => ({ value:g.id, label:`${g.ma_hang} - ${g.ten_hang}` }));
       const goodsSel = createSearchableSelect({ options: goodsOptions, value: filters.goodsId, allowEmptyLabel:"Tất cả hàng hóa", placeholder:"Tất cả hàng hóa", onChange: v => filters.goodsId = v });
-      $("#filter-goods-host").appendChild(goodsSel);
+      $("#filter-goods-host").innerHTML = ""; $("#filter-goods-host").appendChild(goodsSel);
     }
 
     $$("[data-quick]", content).forEach(c => c.addEventListener("click", () => {
