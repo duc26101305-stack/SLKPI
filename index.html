@@ -1436,7 +1436,7 @@ async function generatePayrollPdf(batch, items, employee, company){
 
   const pageW = doc.internal.pageSize.getWidth();
   const logoSize = 20; // kích thước khung logo góc trên (mm)
-  const qrSize = 26;   // kích thước mã QR góc trên (mm) — đã tăng 30% so với 20mm ban đầu
+  const qrSize = 33.8; // kích thước mã QR góc trên (mm) — đã tăng thêm 30% nữa (26mm -> 33.8mm)
 
   // Chuẩn bị ảnh logo công ty & mã QR chuyển khoản TRƯỚC khi vẽ (vì là ảnh tải từ mạng, cần await)
   let logoDataUrl = null;
