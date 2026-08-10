@@ -327,6 +327,20 @@ function removeVNTones(str){
   return str;
 }
 function debounce(fn, wait){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),wait); }; }
+// Lấy thông báo lỗi THẬT SỰ từ Edge Function (vd manage-employee-account).
+// supabase-js chỉ trả về error.message = "Edge Function returned a non-2xx status code"
+// (không có nội dung thật) khi function trả về lỗi — lý do thật nằm trong phần
+// body (Response) ở error.context, phải tự đọc ra mới thấy được.
+async function extractFunctionErrorMessage(err){
+  try {
+    if (err && err.context && typeof err.context.json === "function") {
+      const res = typeof err.context.clone === "function" ? err.context.clone() : err.context;
+      const body = await res.json();
+      if (body && body.error) return body.error;
+    }
+  } catch(e){ /* body không phải JSON hoặc đã bị đọc trước đó thì bỏ qua, dùng message mặc định */ }
+  return (err && err.message) || String(err);
+}
 function uuidShort(){ return Math.random().toString(36).slice(2,10); }
 // Tự sinh mã dạng PREFIX + số thứ tự (vd: NV001, CD002...) dựa trên mã lớn nhất đang có
 function genCode(prefix, rows, key){
@@ -1303,7 +1317,7 @@ async function pageEmployees(content){
             rows = await loadEmployees();
             paint();
           } catch(err){
-            toast("Lỗi tạo tài khoản: " + err.message, "error");
+            toast("Lỗi tạo tài khoản: " + await extractFunctionErrorMessage(err), "error");
             btn.disabled = false; btn.textContent = "Tạo tài khoản";
           }
         });
@@ -1338,7 +1352,7 @@ async function pageEmployees(content){
             toast("Đã đặt lại mật khẩu.", "success");
             close();
           } catch(err){
-            toast("Lỗi: " + err.message, "error");
+            toast("Lỗi: " + await extractFunctionErrorMessage(err), "error");
           }
         });
       }
@@ -1361,7 +1375,7 @@ async function pageEmployees(content){
       rows = await loadEmployees();
       paint();
     } catch(err){
-      toast("Lỗi: " + err.message, "error");
+      toast("Lỗi: " + await extractFunctionErrorMessage(err), "error");
     }
   }
 
@@ -1472,7 +1486,8 @@ async function generatePayrollPdf(batch, items, employee, company){
     try {
       const info = removeVNTones(`${batch.ma_phieu}`).toUpperCase().replace(/[^A-Z0-9 ]/g,"");
       const accName = removeVNTones(employee.ten_nv).toUpperCase();
-      const qrUrl = `https://img.vietqr.io/image/${employee.bank_bin}-${employee.bank_account}-compact2.png?amount=${Math.round(batch.tong_tien)}&addInfo=${encodeURIComponent(info)}&accountName=${encodeURIComponent(accName)}`;
+      const soTienChuyenKhoan = batch.thuc_nhan != null ? Number(batch.thuc_nhan) : (Number(batch.tong_tien) - Number(batch.tong_ung_tru || 0));
+      const qrUrl = `https://img.vietqr.io/image/${employee.bank_bin}-${employee.bank_account}-compact2.png?amount=${Math.round(soTienChuyenKhoan)}&addInfo=${encodeURIComponent(info)}&accountName=${encodeURIComponent(accName)}`;
       qrDataUrl = await imageUrlToDataUrl(qrUrl);
     } catch(e){ /* nếu lỗi tải QR vẫn cho phép tải phiếu bình thường */ }
   }
