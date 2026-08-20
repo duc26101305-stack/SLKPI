@@ -671,7 +671,14 @@ const menuEmployee = [
 ];
 
 function navigate(route){
-  location.hash = "#/" + route;
+  const newHash = "#/" + route;
+  if (location.hash === newHash) {
+    // Hash không đổi thì sự kiện "hashchange" sẽ KHÔNG tự bắn ra, nên phải
+    // tự gọi render() ở đây để trang vẫn được vẽ khi bấm lại đúng route hiện tại.
+    render();
+  } else {
+    location.hash = newHash; // sẽ tự kích hoạt "hashchange" -> render() đúng 1 lần
+  }
 }
 
 async function render(){
@@ -801,7 +808,6 @@ function renderLogin(appEl){
       await doLogin(username, password);
       await bootstrapData();
       navigate(AppState.profile && AppState.profile.role === "admin" ? "dashboard" : "production");
-      await render();
     } catch(err){
       $("#login-error").innerHTML = `<div class="login-error">${esc(mapAuthError(err.message))}</div>`;
       btn.disabled = false; btn.innerHTML = "Đăng nhập";
