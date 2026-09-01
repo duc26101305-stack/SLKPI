@@ -2558,6 +2558,7 @@ async function pageProductLookup(content){
         <div class="field"><label>Đến ngày</label><input class="inp inp-optional" type="date" id="filter-to" value="${filters.dateTo||''}" /></div>
       ` : ""}
       <button class="btn btn-primary" id="btn-apply-filter">${ic('filter')} Lọc</button>
+      <button class="btn btn-success" id="btn-export-lookup">${ic('sheet')} Xuất Excel</button>
     </div>`;
   }
 
@@ -2591,10 +2592,102 @@ async function pageProductLookup(content){
       paint();
     });
     $("#filter-keyword").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("#btn-apply-filter").click(); } });
+    $("#btn-export-lookup").addEventListener("click", () => exportProductLookupExcel(filtered, filters));
   }
 
   await Promise.all([loadFilterOptions(), loadData()]);
   paint();
+}
+
+/* ============================================================================
+ * 17C. XUẤT EXCEL CHO TRA CỨU SẢN PHẨM (bảng combo Màu sắc x SKU, có định dạng)
+ * ==========================================================================*/
+function exportProductLookupExcel(filtered, filters){
+  if (!filtered || !filtered.length) { toast("Không có dữ liệu để xuất.", "warning"); return; }
+
+  const byGoods = new Map();
+  filtered.forEach(r => {
+    const key = r.goods_id || r.ten_hang;
+    if (!byGoods.has(key)) byGoods.set(key, { ma_hang: r.ma_hang, ten_hang: r.ten_hang, rows: [] });
+    byGoods.get(key).rows.push(r);
+  });
+  const groups = Array.from(byGoods.values());
+
+  const thin = { style: "thin", color: { rgb: "CBD5E1" } };
+  const allBorders = { top: thin, bottom: thin, left: thin, right: thin };
+  const titleStyle = { font: { bold: true, sz: 15, color: { rgb: "1E293B" } } };
+  const subStyle = { font: { italic: true, sz: 10, color: { rgb: "64748B" } } };
+  const productStyle = { font: { bold: true, sz: 12, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "4338CA" } }, alignment: { horizontal: "left", vertical: "center" }, border: allBorders };
+  const headStyle = { font: { bold: true, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "6366F1" } }, alignment: { horizontal: "center", vertical: "center" }, border: allBorders };
+  const rowHeadStyle = { font: { bold: true }, fill: { fgColor: { rgb: "EEF2FF" } }, alignment: { horizontal: "left", vertical: "center" }, border: allBorders };
+  const cellStyle = { alignment: { horizontal: "center", vertical: "center" }, border: allBorders };
+  const totalHeadStyle = { font: { bold: true }, fill: { fgColor: { rgb: "F1F5F9" } }, alignment: { horizontal: "left", vertical: "center" }, border: allBorders };
+  const totalCellStyle = { font: { bold: true }, fill: { fgColor: { rgb: "F1F5F9" } }, alignment: { horizontal: "center", vertical: "center" }, border: allBorders };
+
+  const aoa = [];
+  const styles = {};
+  const merges = [];
+  let maxCols = 4;
+
+  function pushRow(arr){ aoa.push(arr); return aoa.length - 1; }
+  function setStyle(r, c, s){ styles[r + "," + c] = s; }
+
+  pushRow(["BÁO CÁO TRA CỨU SẢN PHẨM"]);
+  setStyle(0, 0, titleStyle);
+  const company = AppState.company || {};
+  if (company.ten_cong_ty) pushRow([company.ten_cong_ty]);
+  const filterDesc = `Từ ngày ${fmtDateVN(filters.dateFrom)} đến ${fmtDateVN(filters.dateTo)}` +
+    (filters.keyword ? ` | Từ khóa: "${filters.keyword}"` : "") +
+    (filters.colorName ? ` | Màu: ${filters.colorName}` : "") +
+    (filters.skuName ? ` | SKU: ${filters.skuName}` : "");
+  let r = pushRow([filterDesc]); setStyle(r, 0, subStyle);
+  r = pushRow([`Xuất lúc: ${fmtDateTimeVN(new Date())}`]); setStyle(r, 0, subStyle);
+  pushRow([]);
+
+  groups.forEach(g => {
+    const colors = Array.from(new Set(g.rows.map(x=>x.mau_sac))).sort((a,b)=>a.localeCompare(b,'vi'));
+    const skus = Array.from(new Set(g.rows.map(x=>x.sku))).sort((a,b)=>a.localeCompare(b,'vi'));
+    const matrix = {};
+    g.rows.forEach(x => { const k = x.mau_sac + "|||" + x.sku; matrix[k] = (matrix[k]||0) + x.so_luong; });
+    const totalQty = g.rows.reduce((s,x)=>s+x.so_luong,0);
+    const nCols = skus.length + 2;
+    maxCols = Math.max(maxCols, nCols);
+
+    const titleRow = pushRow([`${g.ma_hang} - ${g.ten_hang}  (Tổng: ${fmtNumber(totalQty)})`, ...Array(nCols-1).fill("")]);
+    for (let c=0;c<nCols;c++) setStyle(titleRow, c, productStyle);
+    merges.push({ s:{ r:titleRow, c:0 }, e:{ r:titleRow, c:nCols-1 } });
+
+    const headRow = pushRow(["Màu sắc \ SKU", ...skus, "Tổng"]);
+    for (let c=0;c<nCols;c++) setStyle(headRow, c, headStyle);
+
+    colors.forEach(color => {
+      const rowTotal = skus.reduce((s,sku)=>s+(matrix[color+"|||"+sku]||0),0);
+      const rIdx = pushRow([color, ...skus.map(sku => matrix[color+"|||"+sku] || 0), rowTotal]);
+      setStyle(rIdx, 0, rowHeadStyle);
+      for (let c=1;c<nCols;c++) setStyle(rIdx, c, cellStyle);
+    });
+
+    const totColVals = skus.map(sku => colors.reduce((s,c)=>s+(matrix[c+"|||"+sku]||0),0));
+    const totRow = pushRow(["Tổng", ...totColVals, totalQty]);
+    setStyle(totRow, 0, totalHeadStyle);
+    for (let c=1;c<nCols;c++) setStyle(totRow, c, totalCellStyle);
+
+    pushRow([]);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws["!merges"] = merges;
+  ws["!cols"] = Array.from({ length: maxCols }, (_, i) => ({ wch: i === 0 ? 24 : 13 }));
+  Object.keys(styles).forEach(key => {
+    const [rr, cc] = key.split(",").map(Number);
+    const addr = XLSX.utils.encode_cell({ r: rr, c: cc });
+    if (!ws[addr]) ws[addr] = { t: "s", v: "" };
+    ws[addr].s = styles[key];
+  });
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Tra cuu san pham");
+  XLSX.writeFile(wb, `TraCuuSanPham_${todayISO()}.xlsx`, { cellStyles: true });
 }
 
 /* ============================================================================
