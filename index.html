@@ -350,12 +350,10 @@ function todayISO(){
   const p = n => String(n).padStart(2,"0");
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
 }
-function startOfWeekISO(){
-  const d = new Date(); const day = (d.getDay()+6)%7;
-  d.setDate(d.getDate()-day); return toISO(d);
-}
-function startOfMonthISO(){ const d=new Date(); d.setDate(1); return toISO(d); }
-function startOfYearISO(){ const d=new Date(); d.setMonth(0,1); return toISO(d); }
+// Bộ lọc nhanh kiểu "N ngày gần nhất" cho gọn (thay vì tính đầu tuần/tháng/năm dương lịch)
+function startOfWeekISO(){ const d=new Date(); d.setDate(d.getDate()-6); return toISO(d); } // 7 ngày gần nhất
+function startOfMonthISO(){ const d=new Date(); d.setDate(d.getDate()-29); return toISO(d); } // 30 ngày gần nhất
+function startOfYearISO(){ const d=new Date(); d.setDate(d.getDate()-364); return toISO(d); } // 365 ngày gần nhất
 function toISO(d){ const p=n=>String(n).padStart(2,"0"); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; }
 function shortId(id){ return id ? id.substring(0,8).toUpperCase() : ""; }
 function removeVNTones(str){
@@ -1690,7 +1688,8 @@ async function generatePayrollPdf(batch, items, employee, company){
     try {
       const info = removeVNTones(`${batch.ma_phieu}`).toUpperCase().replace(/[^A-Z0-9 ]/g,"");
       const accName = removeVNTones(employee.ten_nv).toUpperCase();
-      const qrUrl = `https://img.vietqr.io/image/${employee.bank_bin}-${employee.bank_account}-compact2.png?amount=${Math.round(batch.tong_tien)}&addInfo=${encodeURIComponent(info)}&accountName=${encodeURIComponent(accName)}`;
+      const soTienThucNhan = Math.max(0, Number(batch.tong_tien||0) - Number(batch.tong_ung_tru||0));
+      const qrUrl = `https://img.vietqr.io/image/${employee.bank_bin}-${employee.bank_account}-compact2.png?amount=${Math.round(soTienThucNhan)}&addInfo=${encodeURIComponent(info)}&accountName=${encodeURIComponent(accName)}`;
       qrDataUrl = await imageUrlToDataUrl(qrUrl);
     } catch(e){ /* nếu lỗi tải QR vẫn cho phép tải phiếu bình thường */ }
   }
@@ -2027,42 +2026,61 @@ async function renderProductionEmployee(content){
 
 /* ---------------------- ADMIN ---------------------- */
 async function renderProductionAdmin(content){
-  let tab = "draft";
   let filters = { employeeId: "", processId: "", goodsId: "", dateFrom: startOfMonthISO(), dateTo: todayISO(), quick: "month" };
-  let draftRows = [], historyRows = [];
+  let rows = []; // gộp cả "chưa thanh toán" (production_entries) và "đã thanh toán" (payroll_items) vào 1 danh sách
+  let batchMap = new Map(); // batch_id -> payroll_batches (dùng để Xem phiếu / Tải PDF / hiển thị mã phiếu)
 
-  async function loadDraft(){
-    let q = sb.from("production_entries").select("*, employees(ma_nv,ten_nv), processes(ten_cd), goods(ten_hang)").order("entry_date",{ascending:false});
-    if (filters.employeeId) q = q.eq("employee_id", filters.employeeId);
-    if (filters.processId) q = q.eq("process_id", filters.processId);
-    if (filters.goodsId) q = q.eq("goods_id", filters.goodsId);
-    if (filters.dateFrom) q = q.gte("entry_date", filters.dateFrom);
-    if (filters.dateTo) q = q.lte("entry_date", filters.dateTo);
-    const { data, error } = await fetchAllRows(q);
-    if (error) toast("Lỗi tải sản lượng: " + error.message, "error");
-    draftRows = data || [];
-  }
-  async function loadHistory(){
-    let q = sb.from("payroll_batches").select("*, employees(ma_nv,ten_nv)").order("created_at",{ascending:false});
-    if (filters.employeeId) q = q.eq("employee_id", filters.employeeId);
-    if (filters.dateFrom) q = q.gte("tu_ngay", filters.dateFrom);
-    if (filters.dateTo) q = q.lte("den_ngay", filters.dateTo);
-    const { data, error } = await fetchAllRows(q);
-    if (error) toast("Lỗi tải lịch sử: " + error.message, "error");
-    historyRows = data || [];
+  async function loadAll(){
+    let q1 = sb.from("production_entries").select("*, employees(ma_nv,ten_nv), processes(ten_cd), goods(ten_hang)").order("entry_date",{ascending:false});
+    if (filters.employeeId) q1 = q1.eq("employee_id", filters.employeeId);
+    if (filters.processId) q1 = q1.eq("process_id", filters.processId);
+    if (filters.goodsId) q1 = q1.eq("goods_id", filters.goodsId);
+    if (filters.dateFrom) q1 = q1.gte("entry_date", filters.dateFrom);
+    if (filters.dateTo) q1 = q1.lte("entry_date", filters.dateTo);
+
+    let q2 = sb.from("payroll_items").select("*, employees(ma_nv,ten_nv), payroll_batches(*)").order("entry_date",{ascending:false});
+    if (filters.employeeId) q2 = q2.eq("employee_id", filters.employeeId);
+    if (filters.processId) q2 = q2.eq("process_id", filters.processId);
+    if (filters.goodsId) q2 = q2.eq("goods_id", filters.goodsId);
+    if (filters.dateFrom) q2 = q2.gte("entry_date", filters.dateFrom);
+    if (filters.dateTo) q2 = q2.lte("entry_date", filters.dateTo);
+
+    const [{ data: draft, error: e1 }, { data: paid, error: e2 }] = await Promise.all([fetchAllRows(q1), fetchAllRows(q2)]);
+    if (e1) toast("Lỗi tải sản lượng: " + e1.message, "error");
+    if (e2) toast("Lỗi tải lịch sử: " + e2.message, "error");
+
+    batchMap = new Map();
+    const draftNorm = (draft||[]).map(r => ({
+      kind:"draft", id:r.id, entry_date:r.entry_date, employee_id:r.employee_id,
+      ma_nv:r.employees?.ma_nv, ten_nv:r.employees?.ten_nv,
+      process_id:r.process_id, ten_cd:r.processes?.ten_cd,
+      goods_id:r.goods_id, ten_hang:r.goods?.ten_hang,
+      mau_sac:r.mau_sac, sku:r.sku, gia_tien:r.gia_tien, so_luong:r.so_luong, thanh_tien:r.thanh_tien,
+      ghi_chu:r.ghi_chu, batch_id:null, ma_phieu:null, da_xac_nhan:null,
+    }));
+    const paidNorm = (paid||[]).map(r => {
+      if (r.payroll_batches) batchMap.set(r.batch_id, r.payroll_batches);
+      return {
+        kind:"paid", id:r.id, entry_date:r.entry_date, employee_id:r.employee_id,
+        ma_nv:r.employees?.ma_nv, ten_nv:r.employees?.ten_nv,
+        process_id:r.process_id, ten_cd:r.ten_cd_snapshot,
+        goods_id:r.goods_id, ten_hang:r.ten_hang_snapshot,
+        mau_sac:r.mau_sac_snapshot, sku:r.sku_snapshot, gia_tien:r.gia_tien, so_luong:r.so_luong, thanh_tien:r.thanh_tien,
+        ghi_chu:r.ghi_chu, batch_id:r.batch_id, ma_phieu:r.payroll_batches?.ma_phieu, da_xac_nhan:r.payroll_batches?.da_xac_nhan,
+      };
+    });
+    rows = draftNorm.concat(paidNorm).sort((a,b) => String(b.entry_date||"").localeCompare(String(a.entry_date||"")));
   }
 
   function renderFilterBar(){
     const chips = [
-      { key:"today", label:"Hôm nay" }, { key:"week", label:"Tuần này" },
-      { key:"month", label:"Tháng này" }, { key:"year", label:"Năm nay" }, { key:"custom", label:"Tùy chọn" },
+      { key:"today", label:"Hôm nay" }, { key:"week", label:"7 ngày" },
+      { key:"month", label:"30 ngày" }, { key:"year", label:"365 ngày" }, { key:"custom", label:"Tùy chọn" },
     ];
     return `<div class="filter-bar">
       <div class="field"><label>Nhân viên</label><div id="filter-emp-host"></div></div>
-      ${tab==='draft' ? `
-        <div class="field"><label>Công đoạn</label><div id="filter-process-host"></div></div>
-        <div class="field"><label>Hàng hóa</label><div id="filter-goods-host"></div></div>
-      ` : ""}
+      <div class="field"><label>Công đoạn</label><div id="filter-process-host"></div></div>
+      <div class="field"><label>Hàng hóa</label><div id="filter-goods-host"></div></div>
       <div class="field"><label>Khoảng thời gian</label><div class="chip-group">
         ${chips.map(c => `<div class="chip ${filters.quick===c.key?'active':''}" data-quick="${c.key}">${c.label}</div>`).join("")}
       </div></div>
@@ -2074,75 +2092,43 @@ async function renderProductionAdmin(content){
     </div>`;
   }
 
-  function renderDraftTable(){
-    if (!draftRows.length) return `<div class="empty-state"><div class="icon">${ic('clipboard',null,46)}</div><h3>Không có dữ liệu</h3><p>Không có dòng sản lượng nào khớp bộ lọc.</p></div>`;
+  function renderCombinedTable(){
+    if (!rows.length) return `<div class="empty-state"><div class="icon">${ic('clipboard',null,46)}</div><h3>Không có dữ liệu</h3><p>Không có dòng sản lượng nào khớp bộ lọc.</p></div>`;
     return `<div class="table-wrap"><table><thead><tr>
-      <th>Mã dòng</th><th>Ngày</th><th>Nhân viên</th><th>Công đoạn</th><th>Hàng hóa</th><th>Màu sắc</th><th>SKU</th><th class="text-right">Giá tiền</th><th class="text-right">SL</th><th class="text-right">Thành tiền</th><th>Ghi chú</th><th class="text-center">Thao tác</th>
+      <th>Mã dòng</th><th>Ngày</th><th>Nhân viên</th><th>Công đoạn</th><th>Hàng hóa</th><th>Màu sắc</th><th>SKU</th><th class="text-right">Giá tiền</th><th class="text-right">SL</th><th class="text-right">Thành tiền</th><th>Ghi chú</th><th>Trạng thái</th><th class="text-center">Thao tác</th>
     </tr></thead><tbody>
-      ${draftRows.map(r => `<tr>
+      ${rows.map(r => `<tr>
         <td class="muted">${shortId(r.id)}</td>
         <td>${fmtDateVN(r.entry_date)}</td>
-        <td><b>${esc(r.employees?.ma_nv)}</b> - ${esc(r.employees?.ten_nv)}</td>
-        <td>${esc(r.processes?.ten_cd)}</td>
-        <td>${esc(r.goods?.ten_hang)}</td>
+        <td><b>${esc(r.ma_nv)}</b> - ${esc(r.ten_nv)}</td>
+        <td>${esc(r.ten_cd)}</td>
+        <td>${esc(r.ten_hang)}</td>
         <td class="muted">${esc(r.mau_sac)}</td>
         <td class="muted">${esc(r.sku)}</td>
         <td class="text-right">${fmtNumber(r.gia_tien)}</td>
         <td class="text-right">${fmtNumber(r.so_luong)}</td>
         <td class="text-right" style="font-weight:700">${fmtNumber(r.thanh_tien)}</td>
         <td class="muted">${esc(r.ghi_chu)}</td>
-        <td class="text-center"><button class="icon-btn red" data-del-draft="${r.id}" title="Xóa dòng">${ic('trash')}</button></td>
+        <td>${r.kind==="paid"
+          ? badge("Đã thanh toán","success") + `<div class="muted" style="font-size:11px;margin-top:3px">${r.da_xac_nhan ? "Đã xác nhận" : "Chờ NV xác nhận"}${r.ma_phieu?(" · "+esc(r.ma_phieu)):""}</div>`
+          : badge("Chưa thanh toán","warning")}</td>
+        <td class="text-center"><div class="row-actions" style="justify-content:center">
+          ${r.kind==="draft" ? `
+            <button class="icon-btn red" data-del-draft="${r.id}" title="Xóa dòng">${ic('trash')}</button>
+          ` : `
+            <button class="icon-btn blue" data-view-batch="${r.batch_id}" title="Xem phiếu">${ic('eye')}</button>
+            <button class="icon-btn green" data-pdf-batch="${r.batch_id}" title="Tải PDF">${ic('download')}</button>
+            <button class="icon-btn blue" data-edit-paid="${r.id}" title="Sửa dòng đã trả">${ic('edit')}</button>
+            <button class="icon-btn red" data-del-paid="${r.id}" title="Xóa dòng đã trả">${ic('trash')}</button>
+          `}
+        </div></td>
       </tr>`).join("")}
     </tbody></table></div>`;
   }
 
-  function renderTopEmployeeStats(){
-    const map = new Map();
-    historyRows.forEach(b => {
-      const key = b.employee_id;
-      const cur = map.get(key) || { name: `${b.employees?.ma_nv||""} - ${b.employees?.ten_nv||""}`, count:0, qty:0, money:0 };
-      cur.count += 1; cur.qty += Number(b.tong_so_luong||0); cur.money += Number(b.tong_tien||0);
-      map.set(key, cur);
-    });
-    const list = Array.from(map.values()).sort((a,b)=>b.money-a.money).slice(0,8);
-    if (!list.length) return "";
-    return `<div class="section-title">${ic('trend',null,18)} Thống kê theo nhân viên (top)</div>
-      <div class="table-wrap" style="margin-bottom:20px"><table><thead><tr>
-        <th>#</th><th>Nhân viên</th><th class="text-right">Số phiếu</th><th class="text-right">Tổng SL</th><th class="text-right">Tổng tiền</th>
-      </tr></thead><tbody>
-        ${list.map((r,i)=>`<tr><td>${i===0?badge('TOP 1','success'):i<3?badge('TOP '+(i+1),'info'):(i+1)}</td><td>${esc(r.name)}</td><td class="text-right">${r.count}</td><td class="text-right">${fmtNumber(r.qty)}</td><td class="text-right" style="font-weight:700;color:var(--success-dark)">${fmtCurrency(r.money)}</td></tr>`).join("")}
-      </tbody></table></div>`;
-  }
-
-  function renderHistoryTable(){
-    if (!historyRows.length) return `<div class="empty-state"><div class="icon">${ic('file',null,46)}</div><h3>Không có phiếu lương nào</h3></div>`;
-    return `${renderTopEmployeeStats()}
-      <div class="toolbar"><div class="left"></div><div class="right"><button class="btn" id="btn-export-history">${ic('sheet')} Xuất Excel</button></div></div>
-      <div class="table-wrap"><table><thead><tr>
-        <th>Mã phiếu</th><th>Nhân viên</th><th>Kỳ</th><th class="text-right">Tổng SL</th><th class="text-right">Tổng tiền</th><th class="text-right">Ứng trừ</th><th class="text-right">Thực nhận</th><th>Ngày tạo</th><th>Trạng thái</th><th class="text-center">Thao tác</th>
-      </tr></thead><tbody>
-        ${historyRows.map(b => `<tr>
-          <td><b>${esc(b.ma_phieu)}</b></td>
-          <td>${esc(b.employees?.ma_nv)} - ${esc(b.employees?.ten_nv)}</td>
-          <td>${fmtDateVN(b.tu_ngay)} - ${fmtDateVN(b.den_ngay)}</td>
-          <td class="text-right">${fmtNumber(b.tong_so_luong)}</td>
-          <td class="text-right">${fmtCurrency(b.tong_tien)}</td>
-          <td class="text-right" style="color:var(--danger-dark)">${Number(b.tong_ung_tru||0) > 0 ? "-" + fmtCurrency(b.tong_ung_tru) : "-"}</td>
-          <td class="text-right" style="font-weight:700;color:var(--success-dark)">${fmtCurrency(Number(b.tong_tien||0) - Number(b.tong_ung_tru||0))}</td>
-          <td>${fmtDateTimeVN(b.created_at)}</td>
-          <td>${b.da_xac_nhan ? badge("Đã nhận lương","success") : badge("Chờ nhân viên xác nhận","warning")}</td>
-          <td class="text-center"><div class="row-actions" style="justify-content:center">
-            <button class="icon-btn blue" data-view-batch="${b.id}" title="Xem chi tiết">${ic('eye')}</button>
-            <button class="icon-btn green" data-pdf-batch="${b.id}" title="Tải PDF">${ic('download')}</button>
-            <button class="icon-btn red" data-del-batch="${b.id}" title="Xóa phiếu (hoàn tác)">${ic('trash')}</button>
-          </div></td>
-        </tr>`).join("")}
-      </tbody></table></div>`;
-  }
-
   async function viewBatchDetail(batchId){
     const { data: items } = await sb.from("payroll_items").select("*").eq("batch_id", batchId).order("entry_date");
-    const batch = historyRows.find(b => b.id === batchId);
+    const batch = batchMap.get(batchId);
     const ungTru = Number(batch?.tong_ung_tru||0);
     const thucNhan = Number(batch?.tong_tien||0) - ungTru;
     const bodyHtml = `<div class="table-wrap"><table><thead><tr>
@@ -2156,11 +2142,12 @@ async function renderProductionAdmin(content){
       ${ungTru > 0 ? `<div style="color:var(--danger-dark)">Trừ tiền đã ứng lương: <b>-${fmtCurrency(ungTru)}</b></div>` : ""}
       <div style="font-size:15px;color:var(--success-dark)">Thực nhận: <b>${fmtCurrency(thucNhan)}</b></div>
     </div>` : ""}`;
-    openModal({ title: "Chi tiết phiếu lương", bodyHtml, large:true, footHtml:`<button class="btn btn-primary" data-close-modal>Đóng</button>`, onMount:(overlay)=>{overlay.querySelector('[data-close-modal]').addEventListener('click',()=>overlay.querySelector('[data-close]').click());} });
+    openModal({ title: `Chi tiết phiếu lương${batch?.ma_phieu?(" — "+batch.ma_phieu):""}`, bodyHtml, large:true, footHtml:`<button class="btn btn-primary" data-close-modal>Đóng</button>`, onMount:(overlay)=>{overlay.querySelector('[data-close-modal]').addEventListener('click',()=>overlay.querySelector('[data-close]').click());} });
   }
 
   async function downloadBatchPdf(batchId){
-    const batch = historyRows.find(b=>b.id===batchId);
+    const batch = batchMap.get(batchId);
+    if (!batch) { toast("Không tìm thấy phiếu lương.", "error"); return; }
     const [{ data: items }, { data: employee }] = await Promise.all([
       sb.from("payroll_items").select("*").eq("batch_id", batchId).order("entry_date"),
       sb.from("employees").select("*").eq("id", batch.employee_id).single(),
@@ -2171,37 +2158,95 @@ async function renderProductionAdmin(content){
     } catch(err){ toast("Lỗi tạo PDF: " + err.message, "error"); }
   }
 
+  async function openEditPaidModal(row){
+    let selProcess = row.process_id || "", selGoods = row.goods_id || "", selColor = row.mau_sac || "", selSku = row.sku || "";
+    const bodyHtml = `<div class="form-grid">
+      <div class="field"><label>Công đoạn<span class="req">*</span></label><div id="ep-process-host"></div></div>
+      <div class="field"><label>Hàng hóa<span class="req">*</span></label><div id="ep-goods-host"></div></div>
+      <div class="field"><label>Màu sắc<span class="req">*</span></label><div id="ep-color-host"></div></div>
+      <div class="field"><label>SKU / Size<span class="req">*</span></label><div id="ep-sku-host"></div></div>
+      <div class="field"><label>Giá tiền / 1 SP<span class="req">*</span></label><input class="inp inp-required" type="number" min="0" step="any" id="ep-price" value="${esc(row.gia_tien)}" /></div>
+      <div class="field"><label>Số lượng<span class="req">*</span></label><input class="inp inp-required" type="number" min="0.01" step="any" id="ep-qty" value="${esc(row.so_luong)}" /></div>
+      <div class="field"><label>Ngày<span class="req">*</span></label><input class="inp inp-required" type="date" id="ep-date" value="${row.entry_date||''}" /></div>
+      <div class="field span2"><label>Ghi chú<span class="opt">(tùy chọn)</span></label><input class="inp inp-optional" id="ep-note" value="${esc(row.ghi_chu||'')}" /></div>
+    </div>
+    <p class="helper" style="margin-top:10px">Sửa dòng đã trả sẽ tự tính lại tổng tiền của phiếu lương${row.ma_phieu?(" <b>"+esc(row.ma_phieu)+"</b>"):""}. Các khoản ứng lương đã trừ trước đó sẽ giữ nguyên, không tự trừ lại.</p>`;
+    openModal({
+      title: "Sửa dòng sản lượng đã trả",
+      bodyHtml,
+      footHtml: `<button class="btn" data-cancel>Hủy</button><button class="btn btn-primary" id="btn-save-edit-paid">${ic('check')} Lưu thay đổi</button>`,
+      onMount: (overlay, closeFn) => {
+        overlay.querySelector("[data-cancel]").addEventListener("click", closeFn);
+        const procOptions = AppState.processes.map(p => ({ value:p.id, label:`${p.ma_cd} - ${p.ten_cd}` }));
+        const procSel = createSearchableSelect({ options:procOptions, value:selProcess, required:true, placeholder:"-- Chọn công đoạn --", onChange: v => selProcess = v });
+        overlay.querySelector("#ep-process-host").appendChild(procSel);
+        const goodsOptions = AppState.goods.map(g => ({ value:g.id, label:`${g.ma_hang} - ${g.ten_hang}` }));
+        const goodsSel = createSearchableSelect({ options:goodsOptions, value:selGoods, required:true, placeholder:"-- Chọn hàng hóa --", onChange: v => selGoods = v });
+        overlay.querySelector("#ep-goods-host").appendChild(goodsSel);
+        (async () => {
+          const { data: colorsData } = await fetchAllRows(sb.from("colors").select("*").eq("is_active", true).order("mau_sac"));
+          const colorOptions = (colorsData||[]).map(c => ({ value:c.mau_sac, label:c.mau_sac }));
+          if (selColor && !colorOptions.some(o=>o.value===selColor)) colorOptions.unshift({ value:selColor, label:selColor+" (cũ)" });
+          const host = overlay.querySelector("#ep-color-host");
+          if (!host) return;
+          host.innerHTML = "";
+          host.appendChild(createSearchableSelect({ options:colorOptions, value:selColor, placeholder:"-- Chọn màu sắc --", onChange: v => selColor = v }));
+        })();
+        (async () => {
+          const { data: skusData } = await fetchAllRows(sb.from("skus").select("*").eq("is_active", true).order("sku"));
+          const skuOptions = (skusData||[]).map(s => ({ value:s.sku, label:s.sku }));
+          if (selSku && !skuOptions.some(o=>o.value===selSku)) skuOptions.unshift({ value:selSku, label:selSku+" (cũ)" });
+          const host = overlay.querySelector("#ep-sku-host");
+          if (!host) return;
+          host.innerHTML = "";
+          host.appendChild(createSearchableSelect({ options:skuOptions, value:selSku, placeholder:"-- Chọn SKU --", onChange: v => selSku = v }));
+        })();
+        overlay.querySelector("#btn-save-edit-paid").addEventListener("click", async () => {
+          const gia = Number(overlay.querySelector("#ep-price").value || 0);
+          const qty = Number(overlay.querySelector("#ep-qty").value || 0);
+          const dt = overlay.querySelector("#ep-date").value;
+          const note = overlay.querySelector("#ep-note").value || null;
+          if (!selProcess || !selGoods || !selColor || !selSku) { toast("Vui lòng chọn đủ công đoạn, hàng hóa, màu sắc, SKU.", "warning"); return; }
+          if (!qty || qty <= 0) { toast("Số lượng không hợp lệ.", "warning"); return; }
+          if (!dt) { toast("Vui lòng chọn ngày.", "warning"); return; }
+          const btn = overlay.querySelector("#btn-save-edit-paid"); btn.disabled = true;
+          const { error } = await sb.rpc("admin_update_payroll_item", {
+            p_item_id: row.id, p_process_id: selProcess, p_goods_id: selGoods,
+            p_sku: selSku, p_mau_sac: selColor, p_so_luong: qty, p_gia_tien: gia,
+            p_entry_date: dt, p_ghi_chu: note,
+          });
+          btn.disabled = false;
+          if (error) { toast("Lỗi lưu: " + error.message, "error"); return; }
+          closeFn();
+          toast("Đã cập nhật dòng lương.", "success");
+          await loadAll(); paint();
+        });
+      }
+    });
+  }
+
   function paint(){
     content.innerHTML = `<div class="card">
       ${renderFilterBar()}
-      <div class="tabs">
-        <div class="tab ${tab==='draft'?'active':''}" data-tab="draft">Dữ liệu chưa duyệt (tất cả)</div>
-        <div class="tab ${tab==='history'?'active':''}" data-tab="history">Lịch sử (tất cả)</div>
-      </div>
-      ${tab==='draft' ? `
-        ${entryLineTotalsBar(draftRows)}
-        <div class="toolbar"><div class="left">
-          ${!filters.employeeId ? `<p class="helper" style="margin:0">Chọn 1 nhân viên cụ thể ở bộ lọc phía trên để bật nút "Xuất Excel" và "Chốt lương".</p>` : ""}
-        </div><div class="right">
-          <button class="btn" id="btn-export-production" ${!filters.employeeId?"disabled":""}>${ic('sheet')} Xuất Excel</button>
-          <button class="btn btn-success" id="btn-chot-luong" ${!filters.employeeId?"disabled":""}>${ic('check')} Chốt lương cho nhân viên đã chọn</button>
-        </div></div>
-        <div id="draft-host">${renderDraftTable()}</div>
-      ` : `<div id="history-host">${renderHistoryTable()}</div>`}
+      ${entryLineTotalsBar(rows)}
+      <div class="toolbar"><div class="left">
+        ${!filters.employeeId ? `<p class="helper" style="margin:0">Chọn 1 nhân viên cụ thể ở bộ lọc phía trên để bật nút "Xuất Excel" và "Chốt lương".</p>` : ""}
+      </div><div class="right">
+        <button class="btn" id="btn-export-production" ${!filters.employeeId?"disabled":""}>${ic('sheet')} Xuất Excel</button>
+        <button class="btn btn-success" id="btn-chot-luong" ${!filters.employeeId?"disabled":""}>${ic('check')} Chốt lương cho nhân viên đã chọn</button>
+      </div></div>
+      <div id="rows-host">${renderCombinedTable()}</div>
     </div>`;
 
     const empOptions = AppState.employees.map(e => ({ value:e.id, label:`${e.ma_nv} - ${e.ten_nv}` }));
     const empSel = createSearchableSelect({ options: empOptions, value: filters.employeeId, allowEmptyLabel:"Tất cả nhân viên", placeholder:"Tất cả nhân viên", onChange: v => filters.employeeId = v });
     $("#filter-emp-host").innerHTML = ""; $("#filter-emp-host").appendChild(empSel);
-
-    if (tab === "draft") {
-      const procOptions = AppState.processes.map(p => ({ value:p.id, label:`${p.ma_cd} - ${p.ten_cd}` }));
-      const procSel = createSearchableSelect({ options: procOptions, value: filters.processId, allowEmptyLabel:"Tất cả công đoạn", placeholder:"Tất cả công đoạn", onChange: v => filters.processId = v });
-      $("#filter-process-host").innerHTML = ""; $("#filter-process-host").appendChild(procSel);
-      const goodsOptions = AppState.goods.map(g => ({ value:g.id, label:`${g.ma_hang} - ${g.ten_hang}` }));
-      const goodsSel = createSearchableSelect({ options: goodsOptions, value: filters.goodsId, allowEmptyLabel:"Tất cả hàng hóa", placeholder:"Tất cả hàng hóa", onChange: v => filters.goodsId = v });
-      $("#filter-goods-host").innerHTML = ""; $("#filter-goods-host").appendChild(goodsSel);
-    }
+    const procOptions = AppState.processes.map(p => ({ value:p.id, label:`${p.ma_cd} - ${p.ten_cd}` }));
+    const procSel = createSearchableSelect({ options: procOptions, value: filters.processId, allowEmptyLabel:"Tất cả công đoạn", placeholder:"Tất cả công đoạn", onChange: v => filters.processId = v });
+    $("#filter-process-host").innerHTML = ""; $("#filter-process-host").appendChild(procSel);
+    const goodsOptions = AppState.goods.map(g => ({ value:g.id, label:`${g.ma_hang} - ${g.ten_hang}` }));
+    const goodsSel = createSearchableSelect({ options: goodsOptions, value: filters.goodsId, allowEmptyLabel:"Tất cả hàng hóa", placeholder:"Tất cả hàng hóa", onChange: v => filters.goodsId = v });
+    $("#filter-goods-host").innerHTML = ""; $("#filter-goods-host").appendChild(goodsSel);
 
     $$("[data-quick]", content).forEach(c => c.addEventListener("click", () => {
       filters.quick = c.dataset.quick;
@@ -2217,115 +2262,107 @@ async function renderProductionAdmin(content){
         filters.dateFrom = $("#filter-from").value || null;
         filters.dateTo = $("#filter-to").value || null;
       }
-      if (tab === "draft") await loadDraft(); else await loadHistory();
-      paint();
+      await loadAll(); paint();
     });
 
-    $$(".tab").forEach(t => t.addEventListener("click", async () => {
-      tab = t.dataset.tab;
-      if (tab === "draft") await loadDraft(); else await loadHistory();
-      paint();
+    $$("[data-del-draft]", content).forEach(b => b.addEventListener("click", async () => {
+      const ok = await confirmDialog("Xóa dòng sản lượng này?", { danger:true, okText:"Xóa" });
+      if (!ok) return;
+      const { error } = await sb.from("production_entries").delete().eq("id", b.dataset.delDraft);
+      if (error) { toast("Lỗi: " + error.message, "error"); return; }
+      await loadAll(); paint();
     }));
 
-    if (tab === "draft") {
-      $$("[data-del-draft]", content).forEach(b => b.addEventListener("click", async () => {
-        const ok = await confirmDialog("Xóa dòng sản lượng này?", { danger:true, okText:"Xóa" });
-        if (!ok) return;
-        const { error } = await sb.from("production_entries").delete().eq("id", b.dataset.delDraft);
-        if (error) { toast("Lỗi: " + error.message, "error"); return; }
-        await loadDraft(); paint();
+    const expProdBtn = $("#btn-export-production");
+    if (expProdBtn) expProdBtn.addEventListener("click", () => {
+      if (!filters.employeeId) return;
+      const emp = AppState.employees.find(e => e.id === filters.employeeId);
+      const label = emp ? `${emp.ma_nv} - ${emp.ten_nv}` : "";
+      const exportRows = rows.map(r => ({
+        entry_date:r.entry_date, employees:{ma_nv:r.ma_nv,ten_nv:r.ten_nv}, processes:{ten_cd:r.ten_cd}, goods:{ten_hang:r.ten_hang},
+        sku:r.sku, gia_tien:r.gia_tien, so_luong:r.so_luong, thanh_tien:r.thanh_tien, ghi_chu:r.ghi_chu,
       }));
-      const expProdBtn = $("#btn-export-production");
-      if (expProdBtn) expProdBtn.addEventListener("click", () => {
-        if (!filters.employeeId) return;
-        const emp = AppState.employees.find(e => e.id === filters.employeeId);
-        const label = emp ? `${emp.ma_nv} - ${emp.ten_nv}` : "";
-        exportProductionExcel(draftRows, filters, label);
-      });
-      const chotBtn = $("#btn-chot-luong");
-      if (chotBtn) chotBtn.addEventListener("click", async () => {
-        const empId = filters.employeeId;
-        if (!empId) return;
-        const emp = AppState.employees.find(e => e.id === empId);
-        const { data: allDraft, error: loadErr } = await sb.from("production_entries").select("so_luong, thanh_tien").eq("employee_id", empId);
-        if (loadErr) { toast("Lỗi tải dữ liệu: " + loadErr.message, "error"); return; }
-        if (!allDraft || !allDraft.length) { toast("Nhân viên này không có dữ liệu chưa duyệt.", "warning"); return; }
-        const totalQty = allDraft.reduce((s,r)=>s+Number(r.so_luong||0),0);
-        const totalMoney = allDraft.reduce((s,r)=>s+Number(r.thanh_tien||0),0);
-        const bodyHtml = `<div style="line-height:1.9">
-          <p>Chốt lương cho nhân viên: <b>${esc(emp?.ma_nv)} - ${esc(emp?.ten_nv)}</b></p>
-          <p>Tổng số dòng: <b>${allDraft.length}</b></p>
-          <p>Tổng số lượng: <b>${fmtNumber(totalQty)}</b></p>
-          <p>Tổng tiền: <b style="color:var(--success-dark)">${fmtCurrency(totalMoney)}</b></p>
-          <div class="field" style="margin-top:14px"><label>Ghi chú phiếu<span class="opt">(tùy chọn)</span></label>
-          <textarea class="inp inp-optional" id="chot-note" placeholder="Ghi chú cho phiếu lương này (nếu có)"></textarea></div>
-          <p class="helper">Toàn bộ dữ liệu chưa duyệt của nhân viên này (không chỉ trong khoảng ngày đang lọc) sẽ được chốt và chuyển sang Lịch sử. Hệ thống sẽ tự động tạo file PDF kèm mã QR chuyển khoản.</p>
-        </div>`;
-        openModal({
-          title: "Xác nhận chốt lương",
-          bodyHtml,
-          footHtml: `<button class="btn" data-cancel>Hủy</button><button class="btn btn-success" id="btn-confirm-chot">${ic('check')} Xác nhận chốt lương</button>`,
-          onMount: (overlay, closeFn) => {
-            overlay.querySelector("[data-cancel]").addEventListener("click", closeFn);
-            overlay.querySelector("#btn-confirm-chot").addEventListener("click", async () => {
-              const note = overlay.querySelector("#chot-note").value || null;
-              const btn2 = overlay.querySelector("#btn-confirm-chot");
-              btn2.disabled = true; btn2.innerHTML = `<span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Đang xử lý...`;
-              try {
-                const { data, error } = await sb.rpc("chot_luong_admin", { p_employee_id: empId, p_ghi_chu: note });
-                if (error) throw error;
-                const result = Array.isArray(data) ? data[0] : data;
-                result.ghi_chu = note;
-                closeFn();
-                toast(`Đã chốt lương thành công: ${result.ma_phieu}`, "success");
-                const [{ data: items }, { data: fullEmp }] = await Promise.all([
-                  sb.from("payroll_items").select("*").eq("batch_id", result.batch_id).order("entry_date"),
-                  sb.from("employees").select("*").eq("id", empId).single(),
-                ]);
-                try { await generatePayrollPdf(result, items||[], fullEmp, AppState.company); }
-                catch(pdfErr){ toast("Chốt lương thành công nhưng lỗi khi tạo PDF: " + pdfErr.message, "warning"); }
-                await loadDraft(); await loadHistory();
-                tab = "history";
-                paint();
-              } catch(err){
-                toast("Lỗi chốt lương: " + err.message, "error");
-                btn2.disabled = false; btn2.innerHTML = `${ic('check')} Xác nhận chốt lương`;
-              }
-            });
-          }
-        });
-      });
-    } else {
+      exportProductionExcel(exportRows, filters, label);
+    });
 
-      $$("[data-view-batch]", content).forEach(b => b.addEventListener("click", () => viewBatchDetail(b.dataset.viewBatch)));
-      $$("[data-pdf-batch]", content).forEach(b => b.addEventListener("click", () => downloadBatchPdf(b.dataset.pdfBatch)));
-      $$("[data-del-batch]", content).forEach(b => b.addEventListener("click", async () => {
-        const ok = await confirmDialog("Xóa phiếu lương này? Dữ liệu sẽ không tự động khôi phục về mục Dữ liệu chưa duyệt.", { danger:true, okText:"Xóa phiếu" });
-        if (!ok) return;
-        const { error } = await sb.from("payroll_batches").delete().eq("id", b.dataset.delBatch);
-        if (error) { toast("Lỗi: " + error.message, "error"); return; }
-        toast("Đã xóa phiếu.", "success");
-        await loadHistory(); paint();
-      }));
-      const expBtn = $("#btn-export-history");
-      if (expBtn) expBtn.addEventListener("click", () => {
-        const cols = [
-          { key:"ma_phieu", label:"Mã phiếu" }, { key:"emp", label:"Nhân viên" },
-          { key:"tu_ngay", label:"Từ ngày" }, { key:"den_ngay", label:"Đến ngày" },
-          { key:"tong_so_luong", label:"Tổng SL" }, { key:"tong_tien", label:"Tổng tiền" },
-          { key:"created_at", label:"Ngày tạo" },
-        ];
-        const rows = historyRows.map(b => ({
-          ma_phieu:b.ma_phieu, emp:`${b.employees?.ma_nv} - ${b.employees?.ten_nv}`,
-          tu_ngay: fmtDateVN(b.tu_ngay), den_ngay: fmtDateVN(b.den_ngay),
-          tong_so_luong: b.tong_so_luong, tong_tien: b.tong_tien, created_at: fmtDateTimeVN(b.created_at),
-        }));
-        exportToExcel(rows, cols, `lich_su_luong_${todayISO()}.xlsx`, "Lịch sử");
+    const chotBtn = $("#btn-chot-luong");
+    if (chotBtn) chotBtn.addEventListener("click", async () => {
+      const empId = filters.employeeId;
+      if (!empId) return;
+      const emp = AppState.employees.find(e => e.id === empId);
+      let q = sb.from("production_entries").select("so_luong, thanh_tien").eq("employee_id", empId);
+      if (filters.dateFrom) q = q.gte("entry_date", filters.dateFrom);
+      if (filters.dateTo) q = q.lte("entry_date", filters.dateTo);
+      const { data: allDraft, error: loadErr } = await fetchAllRows(q);
+      if (loadErr) { toast("Lỗi tải dữ liệu: " + loadErr.message, "error"); return; }
+      if (!allDraft || !allDraft.length) { toast("Không có dữ liệu chưa thanh toán trong khoảng thời gian đang lọc cho nhân viên này.", "warning"); return; }
+      const totalQty = allDraft.reduce((s,r)=>s+Number(r.so_luong||0),0);
+      const totalMoney = allDraft.reduce((s,r)=>s+Number(r.thanh_tien||0),0);
+      const rangeLabel = `${filters.dateFrom?fmtDateVN(filters.dateFrom):"..."} - ${filters.dateTo?fmtDateVN(filters.dateTo):"..."}`;
+      const bodyHtml = `<div style="line-height:1.9">
+        <p>Chốt lương cho nhân viên: <b>${esc(emp?.ma_nv)} - ${esc(emp?.ten_nv)}</b></p>
+        <p>Khoảng thời gian đang lọc: <b>${rangeLabel}</b></p>
+        <p>Tổng số dòng: <b>${allDraft.length}</b></p>
+        <p>Tổng số lượng: <b>${fmtNumber(totalQty)}</b></p>
+        <p>Tổng tiền: <b style="color:var(--success-dark)">${fmtCurrency(totalMoney)}</b></p>
+        <div class="field" style="margin-top:14px"><label>Ghi chú phiếu<span class="opt">(tùy chọn)</span></label>
+        <textarea class="inp inp-optional" id="chot-note" placeholder="Ghi chú cho phiếu lương này (nếu có)"></textarea></div>
+        <p class="helper">Chỉ những dòng sản lượng CHƯA thanh toán trong đúng khoảng thời gian đang lọc ở trên sẽ được chốt lương. Hệ thống sẽ tự động tạo file PDF kèm mã QR chuyển khoản.</p>
+      </div>`;
+      openModal({
+        title: "Xác nhận chốt lương",
+        bodyHtml,
+        footHtml: `<button class="btn" data-cancel>Hủy</button><button class="btn btn-success" id="btn-confirm-chot">${ic('check')} Xác nhận chốt lương</button>`,
+        onMount: (overlay, closeFn) => {
+          overlay.querySelector("[data-cancel]").addEventListener("click", closeFn);
+          overlay.querySelector("#btn-confirm-chot").addEventListener("click", async () => {
+            const note = overlay.querySelector("#chot-note").value || null;
+            const btn2 = overlay.querySelector("#btn-confirm-chot");
+            btn2.disabled = true; btn2.innerHTML = `<span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Đang xử lý...`;
+            try {
+              const { data, error } = await sb.rpc("chot_luong_admin", {
+                p_employee_id: empId, p_ghi_chu: note,
+                p_tu_ngay: filters.dateFrom || null, p_den_ngay: filters.dateTo || null,
+              });
+              if (error) throw error;
+              const result = Array.isArray(data) ? data[0] : data;
+              result.ghi_chu = note;
+              closeFn();
+              toast(`Đã chốt lương thành công: ${result.ma_phieu}`, "success");
+              const [{ data: items }, { data: fullEmp }] = await Promise.all([
+                sb.from("payroll_items").select("*").eq("batch_id", result.batch_id).order("entry_date"),
+                sb.from("employees").select("*").eq("id", empId).single(),
+              ]);
+              try { await generatePayrollPdf(result, items||[], fullEmp, AppState.company); }
+              catch(pdfErr){ toast("Chốt lương thành công nhưng lỗi khi tạo PDF: " + pdfErr.message, "warning"); }
+              await loadAll();
+              paint();
+            } catch(err){
+              toast("Lỗi chốt lương: " + err.message, "error");
+              btn2.disabled = false; btn2.innerHTML = `${ic('check')} Xác nhận chốt lương`;
+            }
+          });
+        }
       });
-    }
+    });
+
+    $$("[data-view-batch]", content).forEach(b => b.addEventListener("click", () => viewBatchDetail(b.dataset.viewBatch)));
+    $$("[data-pdf-batch]", content).forEach(b => b.addEventListener("click", () => downloadBatchPdf(b.dataset.pdfBatch)));
+    $$("[data-edit-paid]", content).forEach(b => b.addEventListener("click", () => {
+      const row = rows.find(r => r.id === b.dataset.editPaid && r.kind === "paid");
+      if (row) openEditPaidModal(row);
+    }));
+    $$("[data-del-paid]", content).forEach(b => b.addEventListener("click", async () => {
+      const ok = await confirmDialog("Xóa dòng sản lượng ĐÃ TRẢ này? Hệ thống sẽ tự tính lại tổng tiền phiếu lương (và xóa luôn phiếu nếu đây là dòng cuối cùng của phiếu).", { danger:true, okText:"Xóa" });
+      if (!ok) return;
+      const { error } = await sb.rpc("admin_delete_payroll_item", { p_item_id: b.dataset.delPaid });
+      if (error) { toast("Lỗi: " + error.message, "error"); return; }
+      toast("Đã xóa dòng lương.", "success");
+      await loadAll(); paint();
+    }));
   }
 
-  await loadDraft();
+  await loadAll();
   paint();
 }
 
@@ -2373,7 +2410,7 @@ async function pageDashboard(content){
   const topGoods = Array.from(goodsMap.values()).sort((a,b)=>b.qty-a.qty).slice(0,5);
 
   function topTable(list, moneyKey){
-    if (!list.length) return `<p class="muted" style="padding:16px 0">Chưa có dữ liệu trong tháng này.</p>`;
+    if (!list.length) return `<p class="muted" style="padding:16px 0">Chưa có dữ liệu trong 30 ngày gần nhất.</p>`;
     return `<div class="table-wrap"><table><thead><tr><th>#</th><th>Tên</th><th class="text-right">Số lượng</th><th class="text-right">Thành tiền</th></tr></thead><tbody>
       ${list.map((r,i)=>`<tr><td>${i===0?badge('TOP 1','success'):(i+1)}</td><td>${esc(r.name)}</td><td class="text-right">${fmtNumber(r.qty)}</td><td class="text-right" style="font-weight:700;color:var(--success-dark)">${fmtCurrency(r.money)}</td></tr>`).join("")}
     </tbody></table></div>`;
@@ -2391,7 +2428,7 @@ async function pageDashboard(content){
         <div class="value">${fmtCurrency(draftMoney)}</div>
       </div>
       <div class="kpi">
-        <div class="label">${ic('check',null,15)} Đã chi trả tháng này</div>
+        <div class="label">${ic('check',null,15)} Đã chi trả (30 ngày gần nhất)</div>
         <div class="value" style="color:var(--success-dark)">${fmtCurrency(monthPaid)}</div>
       </div>
       <div class="kpi">
@@ -2401,11 +2438,11 @@ async function pageDashboard(content){
       </div>
     </div>
     <div class="card">
-      <div class="section-title">${ic('trend',null,18)} Top nhân viên tháng này (theo tổng tiền)</div>
+      <div class="section-title">${ic('trend',null,18)} Top nhân viên (30 ngày gần nhất, theo tổng tiền)</div>
       ${topTable(topEmployees)}
     </div>
     <div class="card">
-      <div class="section-title">${ic('box',null,18)} Top hàng hóa tháng này (theo số lượng)</div>
+      <div class="section-title">${ic('box',null,18)} Top hàng hóa (30 ngày gần nhất, theo số lượng)</div>
       ${topTable(topGoods)}
     </div>`;
 }
@@ -2478,9 +2515,9 @@ async function pageSettings(content){
  * 17B. TRA CỨU SẢN PHẨM (BẢNG COMBO MÀU SẮC x SKU)
  * ==========================================================================*/
 async function pageProductLookup(content){
-  let filters = { keyword: "", dateFrom: startOfMonthISO(), dateTo: todayISO(), quick: "month", colorName: "", skuName: "" };
+  let filters = { keyword: "", dateFrom: startOfMonthISO(), dateTo: todayISO(), quick: "month", colorName: "", skuName: "", processId: "" };
   let rawEntries = [];
-  let colorOptions = [], skuOptions = [];
+  let colorOptions = [], skuOptions = [], processOptions = [];
 
   async function loadFilterOptions(){
     const [{ data: colors }, { data: skus }] = await Promise.all([
@@ -2489,21 +2526,25 @@ async function pageProductLookup(content){
     ]);
     colorOptions = (colors||[]).map(c => ({ value: c.mau_sac, label: c.mau_sac }));
     skuOptions = (skus||[]).map(s => ({ value: s.sku, label: s.sku }));
+    processOptions = AppState.processes.map(p => ({ value: p.id, label: `${p.ma_cd} - ${p.ten_cd}` }));
   }
 
   async function loadData(){
     // Lấy TOÀN BỘ sản lượng: cả chưa chốt (production_entries) lẫn đã chốt (payroll_items)
     const [{ data: pe }, { data: pi }] = await Promise.all([
-      fetchAllRows(sb.from("production_entries").select("goods_id, mau_sac, sku, so_luong, entry_date")),
-      fetchAllRows(sb.from("payroll_items").select("goods_id, mau_sac_snapshot, sku_snapshot, so_luong, entry_date, ten_hang_snapshot")),
+      fetchAllRows(sb.from("production_entries").select("goods_id, mau_sac, sku, so_luong, entry_date, process_id")),
+      fetchAllRows(sb.from("payroll_items").select("goods_id, mau_sac_snapshot, sku_snapshot, so_luong, entry_date, ten_hang_snapshot, process_id, ten_cd_snapshot")),
     ]);
     const goodsMap = new Map(AppState.goods.map(g => [g.id, g]));
+    const processMap = new Map(AppState.processes.map(p => [p.id, p]));
     const fromPE = (pe||[]).map(r => ({
       goods_id: r.goods_id,
       ma_hang: goodsMap.get(r.goods_id)?.ma_hang || "",
       ten_hang: goodsMap.get(r.goods_id)?.ten_hang || "(Hàng hóa đã xóa)",
       mau_sac: r.mau_sac || "(chưa chọn)",
       sku: r.sku || "(chưa chọn)",
+      process_id: r.process_id,
+      ten_cd: processMap.get(r.process_id)?.ten_cd || "",
       so_luong: Number(r.so_luong || 0),
       entry_date: r.entry_date,
     }));
@@ -2513,6 +2554,8 @@ async function pageProductLookup(content){
       ten_hang: r.ten_hang_snapshot || goodsMap.get(r.goods_id)?.ten_hang || "(Hàng hóa đã xóa)",
       mau_sac: r.mau_sac_snapshot || "(chưa chọn)",
       sku: r.sku_snapshot || "(chưa chọn)",
+      process_id: r.process_id,
+      ten_cd: r.ten_cd_snapshot || processMap.get(r.process_id)?.ten_cd || "",
       so_luong: Number(r.so_luong || 0),
       entry_date: r.entry_date,
     }));
@@ -2527,6 +2570,7 @@ async function pageProductLookup(content){
       if (filters.dateTo && r.entry_date > filters.dateTo) return false;
       if (filters.colorName && r.mau_sac !== filters.colorName) return false;
       if (filters.skuName && r.sku !== filters.skuName) return false;
+      if (filters.processId && r.process_id !== filters.processId) return false;
       return true;
     });
   }
@@ -2570,11 +2614,12 @@ async function pageProductLookup(content){
 
   function renderFilterBar(){
     const chips = [
-      { key:"today", label:"Hôm nay" }, { key:"week", label:"Tuần này" },
-      { key:"month", label:"Tháng này" }, { key:"year", label:"Năm nay" }, { key:"custom", label:"Tùy chọn" },
+      { key:"today", label:"Hôm nay" }, { key:"week", label:"7 ngày" },
+      { key:"month", label:"30 ngày" }, { key:"year", label:"365 ngày" }, { key:"custom", label:"Tùy chọn" },
     ];
     return `<div class="filter-bar">
       <div class="field"><label>Tên / mã sản phẩm</label><input class="inp inp-optional" id="filter-keyword" placeholder="Nhập tên hoặc mã sản phẩm..." value="${esc(filters.keyword)}" /></div>
+      <div class="field"><label>Công đoạn</label><div id="filter-process-host"></div></div>
       <div class="field"><label>Màu sắc</label><div id="filter-color-host"></div></div>
       <div class="field"><label>SKU</label><div id="filter-sku-host"></div></div>
       <div class="field"><label>Khoảng thời gian</label><div class="chip-group">
@@ -2596,6 +2641,8 @@ async function pageProductLookup(content){
       <div id="combo-host">${renderComboTables(filtered)}</div>
     </div>`;
 
+    const processSel = createSearchableSelect({ options: processOptions, value: filters.processId, allowEmptyLabel:"Tất cả công đoạn", placeholder:"Tất cả công đoạn", onChange: v => { filters.processId = v; paint(); } });
+    $("#filter-process-host").innerHTML = ""; $("#filter-process-host").appendChild(processSel);
     const colorSel = createSearchableSelect({ options: colorOptions, value: filters.colorName, allowEmptyLabel:"Tất cả màu sắc", placeholder:"Tất cả màu sắc", onChange: v => { filters.colorName = v; paint(); } });
     $("#filter-color-host").innerHTML = ""; $("#filter-color-host").appendChild(colorSel);
     const skuSel = createSearchableSelect({ options: skuOptions, value: filters.skuName, allowEmptyLabel:"Tất cả SKU", placeholder:"Tất cả SKU", onChange: v => { filters.skuName = v; paint(); } });
