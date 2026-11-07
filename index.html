@@ -11,7 +11,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <style>
 :root{
   --primary:#4338ca; --primary-dark:#3730a3; --primary-light:#eef2ff;
@@ -626,7 +627,9 @@ function createSearchableSelect({ options, value, placeholder, required, onChang
         list.appendChild(optEl);
       }
       if (!opts.length) {
-        list.innerHTML += `<div class="ssel-empty">Không tìm thấy kết quả</div>`;
+        const emptyEl = document.createElement("div");
+        emptyEl.className = "ssel-empty"; emptyEl.textContent = "Không tìm thấy kết quả";
+        list.appendChild(emptyEl);
         return;
       }
       opts.forEach(o => {
@@ -761,6 +764,11 @@ function parseExcelFile(file){
 /* ============================================================================
  * 8. DATA LOADERS
  * ==========================================================================*/
+// Lấy toàn bộ mã NV kể cả nhân viên đã xóa (ẩn) để sinh mã mới không bị trùng
+async function loadAllEmployeeCodes(){
+  const { data } = await fetchAllRows(sb.from("employees").select("ma_nv"));
+  return data || [];
+}
 async function loadEmployees(){
   const { data, error } = await fetchAllRows(sb.from("employees").select("*").is("deleted_at", null).order("created_at", { ascending: false }));
   if (error) { toast("Lỗi tải nhân viên: "+error.message, "error"); return []; }
@@ -805,6 +813,7 @@ async function loadNotifications(){
   if (AppState.profile.role === "admin") {
     q = q.eq("recipient_role", "admin");
   } else {
+    if (!AppState.profile.employee_id) { AppState.notifications = []; AppState.notifUnread = 0; updateNotifBellUI(); return; }
     q = q.eq("recipient_role", "employee").eq("recipient_employee_id", AppState.profile.employee_id);
   }
   const { data, error } = await q;
@@ -925,6 +934,10 @@ async function doLogin(username, password){
   return data;
 }
 async function doLogout(){
+  try { await sb.removeAllChannels(); } catch(e){}
+  closeNotifPanel();
+  AppState.notifications = []; AppState.notifUnread = 0; AppState.notifInit = false;
+  AppState.employees = [];
   await sb.auth.signOut();
   AppState.profile = null;
   AppState.session = null;
@@ -1094,8 +1107,8 @@ function renderLogin(appEl){
     try {
       await doLogin(username, password);
       await bootstrapData();
-      navigate(AppState.profile && AppState.profile.role === "admin" ? "dashboard" : "production");
-      await render();
+      const target = "#/" + (AppState.profile && AppState.profile.role === "admin" ? "dashboard" : "production");
+      if (location.hash === target) await render(); else location.hash = target;
     } catch(err){
       $("#login-error").innerHTML = `<div class="login-error">${esc(mapAuthError(err.message))}</div>`;
       btn.disabled = false; btn.innerHTML = "Đăng nhập";
@@ -1415,11 +1428,28 @@ function genericCrudPage(config){
               o[c.key] = v === undefined ? "" : v;
             });
             return o;
-          }).filter(r => r[config.uniqueKey]);
-          if (!payloadRows.length) { toast("Không tìm thấy cột hợp lệ trong file. Vui lòng dùng đúng file template.", "error"); return; }
-          const { error } = await sb.from(config.table).upsert(payloadRows, { onConflict: config.uniqueKey });
+          });
+          // Bỏ dòng trống hoàn toàn; dòng thiếu cột bắt buộc (vd tên) thì báo lại cho người dùng
+          const reqCols = config.columns.filter(c => c.required && c.key !== config.uniqueKey);
+          const nonEmpty = payloadRows.filter(r => config.columns.some(c => String(r[c.key] ?? "").trim() !== "" && !(c.type === "number" && Number(r[c.key]) === 0)));
+          const valid = nonEmpty.filter(r => reqCols.every(c => c.type === "number" || String(r[c.key] ?? "").trim() !== ""));
+          const skipped = nonEmpty.length - valid.length;
+          if (!valid.length) { toast("Không tìm thấy dòng hợp lệ trong file. Vui lòng dùng đúng file template.", "error"); return; }
+          // Tự sinh mã cho dòng để trống mã (tính tiếp từ mã lớn nhất đang có, kể cả mã vừa sinh)
+          let codePool = rows.map(r => ({ [config.uniqueKey]: r[config.uniqueKey] }));
+          valid.forEach(r => {
+            r[config.uniqueKey] = String(r[config.uniqueKey] ?? "").trim();
+            codePool.push({ [config.uniqueKey]: r[config.uniqueKey] });
+          });
+          valid.forEach(r => {
+            if (!r[config.uniqueKey] && config.codePrefix) {
+              r[config.uniqueKey] = genCode(config.codePrefix, codePool, config.uniqueKey);
+              codePool.push({ [config.uniqueKey]: r[config.uniqueKey] });
+            }
+          });
+          const { error } = await sb.from(config.table).upsert(valid, { onConflict: config.uniqueKey });
           if (error) throw error;
-          toast(`Đã nhập ${payloadRows.length} dòng từ Excel.`, "success");
+          toast(`Đã nhập ${valid.length} dòng từ Excel.` + (skipped ? ` Bỏ qua ${skipped} dòng thiếu thông tin bắt buộc.` : ""), skipped ? "warning" : "success");
           rows = config.table === "processes" ? await loadProcesses() : await loadGoods();
           paint();
         } catch(err){
@@ -1611,7 +1641,7 @@ async function pageEmployees(content){
           const fd = new FormData(form);
           const bankInfo = AppState.banks.find(b => b.value === pickedBin);
           let maNv = (fd.get("ma_nv") || "").trim();
-          if (!maNv) maNv = genCode("NV", rows, "ma_nv");
+          if (!maNv) maNv = genCode("NV", await loadAllEmployeeCodes(), "ma_nv");
           const payload = {
             ma_nv: maNv, ten_nv: fd.get("ten_nv"), sdt: fd.get("sdt"),
             chuc_vu: fd.get("chuc_vu"), bank_account: fd.get("bank_account"), ghi_chu: fd.get("ghi_chu"),
@@ -1752,15 +1782,21 @@ async function pageEmployees(content){
       if (!file) return;
       try {
         const excelRows = await parseExcelFile(file);
-        const payloadRows = excelRows.map(er => {
+        const allRows = excelRows.map(er => {
           const o = {};
-          EMP_COLUMNS.forEach(c => o[c.key] = er[c.label] !== undefined ? String(er[c.label]) : "");
+          EMP_COLUMNS.forEach(c => o[c.key] = er[c.label] !== undefined ? String(er[c.label]).trim() : "");
           return o;
-        }).filter(r => r.ma_nv);
-        if (!payloadRows.length) { toast("File không hợp lệ hoặc trống.", "error"); return; }
+        }).filter(r => EMP_COLUMNS.some(c => r[c.key] !== ""));
+        const payloadRows = allRows.filter(r => r.ten_nv);
+        const skipped = allRows.length - payloadRows.length;
+        if (!payloadRows.length) { toast("File không hợp lệ hoặc trống (thiếu Tên nhân viên).", "error"); return; }
+        const codePool = (await loadAllEmployeeCodes()).concat(payloadRows.filter(r => r.ma_nv).map(r => ({ ma_nv: r.ma_nv })));
+        payloadRows.forEach(r => {
+          if (!r.ma_nv) { r.ma_nv = genCode("NV", codePool, "ma_nv"); codePool.push({ ma_nv: r.ma_nv }); }
+        });
         const { error } = await sb.from("employees").upsert(payloadRows, { onConflict: "ma_nv" });
         if (error) throw error;
-        toast(`Đã nhập ${payloadRows.length} nhân viên.`, "success");
+        toast(`Đã nhập ${payloadRows.length} nhân viên.` + (skipped ? ` Bỏ qua ${skipped} dòng thiếu tên.` : ""), skipped ? "warning" : "success");
         rows = await loadEmployees();
         paint();
       } catch(err){ toast("Lỗi nhập Excel: " + err.message, "error"); }
@@ -1797,13 +1833,80 @@ const FONT_VN_BOLD_B64 = "AAEAAAASAQAABAAgRFNJRwAAAAEAAiQEAAAACEdERUYfmhtBAAHtpA
  * ==========================================================================*/
 async function imageUrlToDataUrl(url){
   const res = await fetch(url);
+  if (!res.ok) throw new Error("HTTP " + res.status);
   const blob = await res.blob();
+  if (blob.type && !/^image\//i.test(blob.type)) throw new Error("Không phải ảnh: " + blob.type);
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onloadend = () => resolve(reader.result);
     reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
+}
+// Tải ảnh có thử lại (mạng chập chờn / server VietQR chậm thì vẫn có QR)
+async function imageUrlToDataUrlRetry(url, tries){
+  tries = tries || 3;
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try { return await imageUrlToDataUrl(url); }
+    catch(e){ lastErr = e; await new Promise(r => setTimeout(r, 600 * (i + 1))); }
+  }
+  throw lastErr;
+}
+// Tạo chuỗi VietQR (chuẩn EMVCo/NAPAS 247) — không cần gọi server VietQR
+function crc16ccitt(str){
+  let crc = 0xFFFF;
+  const bytes = new TextEncoder().encode(str);
+  for (const b of bytes) {
+    crc ^= b << 8;
+    for (let i = 0; i < 8; i++) crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xFFFF : (crc << 1) & 0xFFFF;
+  }
+  return crc.toString(16).toUpperCase().padStart(4, "0");
+}
+function buildVietQRPayload({ bin, account, amount, info }){
+  const tlv = (id, v) => id + String(v.length).padStart(2, "0") + v;
+  const amt = Math.max(0, Math.round(Number(amount || 0)));
+  const addInfo = String(info || "").replace(/[^A-Za-z0-9 ]/g, "").slice(0, 25);
+  let p = tlv("00", "01") + tlv("01", amt > 0 ? "12" : "11")
+    + tlv("38", tlv("00", "A000000727") + tlv("01", tlv("00", String(bin)) + tlv("01", String(account).replace(/\s+/g, ""))) + tlv("02", "QRIBFTTA"))
+    + tlv("53", "704") + (amt > 0 ? tlv("54", String(amt)) : "") + tlv("58", "VN")
+    + (addInfo ? tlv("62", tlv("08", addInfo)) : "") + "6304";
+  return p + crc16ccitt(p);
+}
+
+// Vẽ mã QR trực tiếp bằng nét vector vào PDF (nét, không cần mạng). Trả về true nếu vẽ được.
+function drawQrVector(doc, text, x, y, size){
+  if (typeof qrcode !== "function") return false;
+  const qr = qrcode(0, "M"); qr.addData(text); qr.make();
+  const n = qr.getModuleCount(), quiet = 2, cell = size / (n + quiet * 2);
+  doc.setFillColor(255, 255, 255); doc.rect(x, y, size, size, "F");
+  doc.setFillColor(0, 0, 0);
+  for (let r = 0; r < n; r++) {
+    let c = 0;
+    while (c < n) {
+      if (!qr.isDark(r, c)) { c++; continue; }
+      let e = c; while (e < n && qr.isDark(r, e)) e++;
+      doc.rect(x + (quiet + c) * cell, y + (quiet + r) * cell, (e - c) * cell + 0.01, cell + 0.01, "F");
+      c = e;
+    }
+  }
+  return true;
+}
+// Mã QR chuyển khoản cho 1 nhân viên: ưu tiên tự tạo; nếu thiếu thư viện thì tải ảnh VietQR
+async function drawTransferQr(doc, employee, amount, info, x, y, size){
+  const payload = buildVietQRPayload({ bin: employee.bank_bin, account: employee.bank_account, amount, info: removeVNTones(info).toUpperCase() });
+  try { if (drawQrVector(doc, payload, x, y, size)) return true; } catch(e){ console.warn("[PDF] Lỗi vẽ QR:", e); }
+  try {
+    const accName = removeVNTones(employee.ten_nv).toUpperCase();
+    const url = `https://img.vietqr.io/image/${employee.bank_bin}-${employee.bank_account}-qr_only.jpg?amount=${Math.round(amount)}&addInfo=${encodeURIComponent(removeVNTones(info).toUpperCase().replace(/[^A-Z0-9 ]/g,""))}&accountName=${encodeURIComponent(accName)}`;
+    const dataUrl = await imageUrlToDataUrlRetry(url, 2);
+    doc.addImage(dataUrl, imgFormatOf(dataUrl), x, y, size, size);
+    return true;
+  } catch(e){ console.warn("[PDF] Không tải được mã QR:", e); return false; }
+}
+// Nhận biết định dạng ảnh từ dataURL để jsPDF không lỗi khi ảnh là JPG
+function imgFormatOf(dataUrl){
+  return /^data:image\/jpe?g/i.test(dataUrl || "") ? "JPEG" : "PNG";
 }
 
 async function generatePayrollPdf(batch, items, employee, company){
@@ -1819,32 +1922,21 @@ async function generatePayrollPdf(batch, items, employee, company){
   doc.setFont("BeVietnamPro", "normal");
 
   const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
   const logoSize = 20; // kích thước khung logo góc trên (mm)
-  const qrSize = 33.8; // kích thước mã QR góc trên (mm) — đã tăng thêm 30% nữa (26mm -> 33.8mm)
+  const qrSize = 34;   // kích thước mã QR (mm) — đặt bên phải, từ dòng tiêu đề trở xuống
+  const soTienThucNhan = Math.max(0, Number(batch.tong_tien||0) - Number(batch.tong_ung_tru||0));
 
   // Chuẩn bị ảnh logo công ty & mã QR chuyển khoản TRƯỚC khi vẽ (vì là ảnh tải từ mạng, cần await)
   let logoDataUrl = null;
   if (company?.logo_url) {
-    try { logoDataUrl = await imageUrlToDataUrl(company.logo_url); } catch(e){ /* lỗi tải logo thì bỏ qua, vẫn xuất phiếu */ }
+    try { logoDataUrl = await imageUrlToDataUrlRetry(company.logo_url, 2); } catch(e){ /* lỗi tải logo thì bỏ qua, vẫn xuất phiếu */ }
   }
-  let qrDataUrl = null;
-  if (employee.bank_bin && employee.bank_account) {
-    try {
-      const info = removeVNTones(`${batch.ma_phieu}`).toUpperCase().replace(/[^A-Z0-9 ]/g,"");
-      const accName = removeVNTones(employee.ten_nv).toUpperCase();
-      const soTienThucNhan = Math.max(0, Number(batch.tong_tien||0) - Number(batch.tong_ung_tru||0));
-      const qrUrl = `https://img.vietqr.io/image/${employee.bank_bin}-${employee.bank_account}-compact2.png?amount=${Math.round(soTienThucNhan)}&addInfo=${encodeURIComponent(info)}&accountName=${encodeURIComponent(accName)}`;
-      qrDataUrl = await imageUrlToDataUrl(qrUrl);
-    } catch(e){ /* nếu lỗi tải QR vẫn cho phép tải phiếu bình thường */ }
-  }
+  const coTaiKhoan = !!(employee.bank_bin && employee.bank_account);
 
   // Logo công ty — góc TRÁI trên
   if (logoDataUrl) {
-    try { doc.addImage(logoDataUrl, "PNG", 10, 8, logoSize, logoSize); } catch(e){ /* ảnh lỗi định dạng thì bỏ qua */ }
-  }
-  // Mã QR chuyển khoản — góc PHẢI trên (không kèm dòng nội dung chuyển khoản bên dưới nữa)
-  if (qrDataUrl) {
-    doc.addImage(qrDataUrl, "PNG", pageW - qrSize - 10, 8, qrSize, qrSize);
+    try { doc.addImage(logoDataUrl, imgFormatOf(logoDataUrl), 10, 8, logoSize, logoSize); } catch(e){ /* ảnh lỗi định dạng thì bỏ qua */ }
   }
 
   let y = 14;
@@ -1855,21 +1947,51 @@ async function generatePayrollPdf(batch, items, employee, company){
   doc.setFont("BeVietnamPro","normal"); doc.setFontSize(8.5);
   if (company?.dia_chi) { doc.text(String(company.dia_chi), pageW/2, y, { align:"center" }); y += 4; }
   if (company?.sdt) { doc.text("ĐT: " + company.sdt, pageW/2, y, { align:"center" }); y += 4; }
-  y = Math.max(y, 8 + Math.max(logoSize, qrSize)) + 3; // tránh đè lên logo/QR góc trên
-  doc.setDrawColor(200); doc.line(10, y, pageW-10, y); y += 7;
+  y = Math.max(y, logoDataUrl ? 8 + logoSize : 0) + 3; // tránh đè lên logo góc trên
+  doc.setDrawColor(200); doc.line(10, y, pageW-10, y); y += 4;
 
-  doc.setFont("BeVietnamPro","bold"); doc.setFontSize(14);
-  doc.text("PHIẾU CHI LƯƠNG SẢN LƯỢNG", pageW/2, y, { align:"center" }); y += 6;
+  // ---- Khối thông tin bên TRÁI + mã QR bên PHẢI (cùng hàng) ----
+  const hasQrBox = coTaiKhoan; // có tài khoản thì luôn chừa khung bên phải (QR hoặc thông tin CK dự phòng)
+  const qrX = pageW - qrSize - 10;
+  const blockTop = y;
+  const leftRight = hasQrBox ? qrX - 4 : pageW - 10;  // mép phải của khối chữ bên trái
+  const leftCenter = (10 + leftRight) / 2;
+  const leftW = leftRight - 10;
+
+  if (hasQrBox) {
+    const qrOk = await drawTransferQr(doc, employee, soTienThucNhan, batch.ma_phieu, qrX, blockTop, qrSize);
+    if (!qrOk) {
+      // Dự phòng khi không tải được QR: in thông tin chuyển khoản để chuyển tay
+      doc.setDrawColor(180); doc.rect(qrX, blockTop, qrSize, qrSize);
+      doc.setFont("BeVietnamPro","bold"); doc.setFontSize(7.5);
+      doc.text("CHUYỂN KHOẢN", qrX + qrSize/2, blockTop + 6, { align:"center" });
+      doc.setFont("BeVietnamPro","normal"); doc.setFontSize(7);
+      const lines = doc.splitTextToSize(`${employee.bank_name || ""}\nSTK: ${employee.bank_account}\n${employee.ten_nv}\nND: ${batch.ma_phieu}`, qrSize - 4);
+      doc.text(lines, qrX + qrSize/2, blockTop + 11, { align:"center" });
+    }
+  }
+
+  // Tiêu đề: tự thu nhỏ cỡ chữ nếu không vừa khối bên trái
+  y = blockTop + 5;
+  doc.setFont("BeVietnamPro","bold");
+  let titleSize = 14;
+  doc.setFontSize(titleSize);
+  while (titleSize > 10 && doc.getTextWidth("PHIẾU CHI LƯƠNG SẢN LƯỢNG") > leftW) { titleSize -= 0.5; doc.setFontSize(titleSize); }
+  doc.text("PHIẾU CHI LƯƠNG SẢN LƯỢNG", leftCenter, y, { align:"center" }); y += 6;
   doc.setFont("BeVietnamPro","normal"); doc.setFontSize(9.5);
-  doc.text(`Số phiếu: ${batch.ma_phieu}`, pageW/2, y, { align:"center" }); y += 4.5;
-  doc.text(`Kỳ: ${fmtDateVN(batch.tu_ngay)} - ${fmtDateVN(batch.den_ngay)}`, pageW/2, y, { align:"center" }); y += 4.5;
-  doc.text(`Ngày lập: ${fmtDateVN(new Date())}`, pageW/2, y, { align:"center" }); y += 7;
+  doc.text(`Số phiếu: ${batch.ma_phieu}`, leftCenter, y, { align:"center" }); y += 4.5;
+  doc.text(`Kỳ: ${fmtDateVN(batch.tu_ngay)} - ${fmtDateVN(batch.den_ngay)}`, leftCenter, y, { align:"center" }); y += 4.5;
+  doc.text(`Ngày lập: ${fmtDateVN(new Date())}`, leftCenter, y, { align:"center" }); y += 6.5;
 
   doc.setFontSize(9.5);
-  doc.text(`Mã NV: ${employee.ma_nv}`, 10, y);
-  doc.text(`Nhân viên: ${employee.ten_nv}`, 55, y); y += 5;
-  if (employee.chuc_vu) { doc.text(`Chức vụ: ${employee.chuc_vu}`, 10, y); y += 5; }
-  y += 2;
+  doc.text(`Mã NV: ${employee.ma_nv || ""}`, 10, y); y += 5;
+  const nvLines = doc.splitTextToSize(`Nhân viên: ${employee.ten_nv || ""}`, leftW);
+  doc.text(nvLines, 10, y); y += 5 * nvLines.length;
+  if (employee.chuc_vu) {
+    const cvLines = doc.splitTextToSize(`Chức vụ: ${employee.chuc_vu}`, leftW);
+    doc.text(cvLines, 10, y); y += 5 * cvLines.length;
+  }
+  y = Math.max(y, hasQrBox ? blockTop + qrSize + 4 : y) + 1;
 
   const body = items.map((it,i) => [
     i+1, it.ten_cd_snapshot || "", it.ten_hang_snapshot || "", it.mau_sac_snapshot || "", it.sku_snapshot || "",
@@ -1886,6 +2008,9 @@ async function generatePayrollPdf(batch, items, employee, company){
     margin: { left: 10, right: 10 },
   });
   y = doc.lastAutoTable.finalY + 6;
+  // Phần tổng + chữ ký cần ~70mm; không đủ chỗ thì sang trang mới để không bị cắt mất
+  const footerH = 45 + (batch.ghi_chu ? 18 : 0) + (Number(batch.tong_ung_tru||0) > 0 ? 6 : 0);
+  if (y + footerH > pageH - 8) { doc.addPage(); y = 15; }
 
   doc.setFont("BeVietnamPro","bold"); doc.setFontSize(10);
   doc.text(`Tổng số lượng: ${fmtNumber(batch.tong_so_luong)}`, 10, y); y += 5.5;
@@ -1897,7 +2022,7 @@ async function generatePayrollPdf(batch, items, employee, company){
     doc.setTextColor(0,0,0);
   }
   doc.setFontSize(12);
-  doc.text(`THỰC NHẬN: ${fmtCurrency(Number(batch.tong_tien||0) - Number(batch.tong_ung_tru||0))}`, 10, y);
+  doc.text(`THỰC NHẬN: ${fmtCurrency(soTienThucNhan)}`, 10, y);
   y += 8;
 
   doc.setFont("BeVietnamPro","normal"); doc.setFontSize(9);
@@ -2426,11 +2551,13 @@ async function renderProductionAdmin(content){
                 result.ghi_chu = note;
                 closeFn();
                 toast(`Đã chốt lương thành công: ${result.ma_phieu}`, "success");
-                const [{ data: items }, { data: fullEmp }] = await Promise.all([
+                const [{ data: items }, { data: fullEmp }, { data: fullBatch }] = await Promise.all([
                   sb.from("payroll_items").select("*").eq("batch_id", result.batch_id).order("entry_date"),
                   sb.from("employees").select("*").eq("id", empId).single(),
+                  sb.from("payroll_batches").select("*").eq("id", result.batch_id).maybeSingle(),
                 ]);
-                try { await generatePayrollPdf(result, items||[], fullEmp, AppState.company); }
+                const batchForPdf = Object.assign({}, result, fullBatch || {});
+                try { await generatePayrollPdf(batchForPdf, items||[], fullEmp, AppState.company); }
                 catch(pdfErr){ toast("Chốt lương thành công nhưng lỗi khi tạo PDF: " + pdfErr.message, "warning"); }
                 await loadDraft(); await loadHistory();
                 tab = "history";
@@ -2482,7 +2609,7 @@ async function renderProductionAdmin(content){
 async function pageDashboard(content){
   const monthStart = startOfMonthISO();
   const [{ data: draft }, { data: batchesThisMonth }, { data: peThisMonth }, { data: piThisMonth }] = await Promise.all([
-    fetchAllRows(sb.from("production_entries").select("id, employee_id, goods_id, so_luong, thanh_tien")),
+    fetchAllRows(sb.from("production_entries").select("thanh_tien")),
     fetchAllRows(sb.from("payroll_batches").select("tong_tien, created_at").gte("created_at", monthStart)),
     fetchAllRows(sb.from("production_entries").select("employee_id, goods_id, so_luong, thanh_tien, entry_date, goods(ten_hang)").gte("entry_date", monthStart)),
     fetchAllRows(sb.from("payroll_items").select("employee_id, goods_id, so_luong, thanh_tien, entry_date, ten_hang_snapshot").gte("entry_date", monthStart)),
@@ -2640,12 +2767,23 @@ async function pageProductLookup(content){
     processOptions = AppState.processes.map(p => ({ value: p.id, label: `${p.ma_cd} - ${p.ten_cd}` }));
   }
 
+  let loadedKey = null;
   async function loadData(){
-    // Lấy TOÀN BỘ sản lượng: cả chưa chốt (production_entries) lẫn đã chốt (payroll_items)
-    const [{ data: pe }, { data: pi }] = await Promise.all([
-      fetchAllRows(sb.from("production_entries").select("employee_id, goods_id, mau_sac, sku, so_luong, entry_date, process_id")),
-      fetchAllRows(sb.from("payroll_items").select("employee_id, goods_id, mau_sac_snapshot, sku_snapshot, so_luong, entry_date, ten_hang_snapshot, process_id, ten_cd_snapshot")),
+    // Lấy sản lượng cả chưa chốt (production_entries) lẫn đã chốt (payroll_items),
+    // nhưng CHỈ trong khoảng ngày đang lọc (lọc trên server -> nhanh dù dữ liệu nhiều năm)
+    const key = (filters.dateFrom || "") + "|" + (filters.dateTo || "");
+    if (key === loadedKey) return;
+    const withRange = (q) => {
+      if (filters.dateFrom) q = q.gte("entry_date", filters.dateFrom);
+      if (filters.dateTo) q = q.lte("entry_date", filters.dateTo);
+      return q;
+    };
+    const [{ data: pe, error: e1 }, { data: pi, error: e2 }] = await Promise.all([
+      fetchAllRows(withRange(sb.from("production_entries").select("employee_id, goods_id, mau_sac, sku, so_luong, entry_date, process_id"))),
+      fetchAllRows(withRange(sb.from("payroll_items").select("employee_id, goods_id, mau_sac_snapshot, sku_snapshot, so_luong, entry_date, ten_hang_snapshot, process_id, ten_cd_snapshot"))),
     ]);
+    if (e1 || e2) { toast("Lỗi tải dữ liệu: " + (e1 || e2).message, "error"); return; }
+    loadedKey = key;
     const goodsMap = new Map(AppState.goods.map(g => [g.id, g]));
     const processMap = new Map(AppState.processes.map(p => [p.id, p]));
     const fromPE = (pe||[]).map(r => ({
@@ -2760,22 +2898,25 @@ async function pageProductLookup(content){
     const skuSel = createSearchableSelect({ options: skuOptions, value: filters.skuName, allowEmptyLabel:"Tất cả SKU", placeholder:"Tất cả SKU", onChange: v => { filters.skuName = v; paint(); } });
     $("#filter-sku-host").innerHTML = ""; $("#filter-sku-host").appendChild(skuSel);
 
-    const quickSel = createQuickPeriodSelect({ value: filters.quick, onChange: (k) => {
+    const quickSel = createQuickPeriodSelect({ value: filters.quick, onChange: async (k) => {
       filters.quick = k;
       if (k !== "custom") {
         const r = getQuickRange(k);
         filters.dateFrom = r.from; filters.dateTo = r.to;
+        await loadData();
       }
       paint();
     }});
     $("#filter-quick-host").innerHTML = ""; $("#filter-quick-host").appendChild(quickSel);
 
-    $("#btn-apply-filter").addEventListener("click", () => {
+    $("#btn-apply-filter").addEventListener("click", async () => {
       filters.keyword = $("#filter-keyword").value || "";
       if (filters.quick === "custom") {
         filters.dateFrom = $("#filter-from").value || null;
         filters.dateTo = $("#filter-to").value || null;
       }
+      const btn = $("#btn-apply-filter"); btn.disabled = true;
+      await loadData();
       paint();
     });
     $("#filter-keyword").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("#btn-apply-filter").click(); } });
@@ -2992,22 +3133,13 @@ async function generateSalaryAdvancePdf(advance, employee, company){
   if (company?.logo_url) {
     try { logoDataUrl = await imageUrlToDataUrl(company.logo_url); } catch(e){ /* bỏ qua nếu lỗi tải logo */ }
   }
-  let qrDataUrl = null;
-  if (isChuyenKhoan && employee.bank_bin && employee.bank_account) {
-    try {
-      const info = removeVNTones(`${advance.ma_phieu}`).toUpperCase().replace(/[^A-Z0-9 ]/g,"");
-      const accName = removeVNTones(employee.ten_nv).toUpperCase();
-      const qrUrl = `https://img.vietqr.io/image/${employee.bank_bin}-${employee.bank_account}-compact2.png?amount=${Math.round(advance.so_tien)}&addInfo=${encodeURIComponent(info)}&accountName=${encodeURIComponent(accName)}`;
-      qrDataUrl = await imageUrlToDataUrl(qrUrl);
-    } catch(e){ /* nếu lỗi tải QR vẫn cho phép tải phiếu bình thường */ }
-  }
+  const hasQr = isChuyenKhoan && employee.bank_bin && employee.bank_account;
 
   if (logoDataUrl) {
     try { doc.addImage(logoDataUrl, "PNG", 10, 8, logoSize, logoSize); } catch(e){}
   }
-  if (qrDataUrl) {
-    doc.addImage(qrDataUrl, "PNG", pageW - qrSize - 10, 8, qrSize, qrSize);
-  }
+  let qrDataUrl = false;
+  if (hasQr) qrDataUrl = await drawTransferQr(doc, employee, advance.so_tien, advance.ma_phieu, pageW - qrSize - 10, 8, qrSize);
 
   let y = 14;
   doc.setFont("BeVietnamPro", "bold"); doc.setFontSize(13);
@@ -3302,7 +3434,11 @@ async function renderSalaryAdvancesAdmin(content){
 /* Bootstrapping cuối file: lắng nghe thay đổi route + trạng thái đăng nhập */
 window.addEventListener("hashchange", render);
 sb.auth.onAuthStateChange((event) => {
-  if (event === "SIGNED_OUT") { AppState.profile = null; render(); }
+  if (event === "SIGNED_OUT") {
+    try { sb.removeAllChannels(); } catch(e){}
+    AppState.profile = null; AppState.notifications = []; AppState.notifUnread = 0; AppState.notifInit = false;
+    render();
+  }
 });
 (async function init(){
   await bootstrapData();
